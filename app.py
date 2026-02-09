@@ -15,73 +15,61 @@ st.set_page_config(
 st.title("🌍 Asset Allocation – Offshore")
 
 # =========================================================
-# UPLOAD BASE
+# UPLOAD
 # =========================================================
-st.sidebar.header("📂 Base de Dados")
-
 uploaded_file = st.sidebar.file_uploader(
-    "Faça upload da base (Excel)",
+    "📂 Upload da base (Excel)",
     type=["xlsx"]
 )
 
 if uploaded_file is None:
-    st.info("⬅️ Faça upload da base de dados para iniciar as análises.")
+    st.info("⬅️ Faça upload da base para iniciar.")
     st.stop()
 
 # =========================================================
-# LOAD DATA (ROBUSTO)
+# LOAD DATA — AJUSTADO À SUA BASE
 # =========================================================
 @st.cache_data
 def load_data(file):
     df = pd.read_excel(file)
 
-    # Detecta coluna de data automaticamente
-    date_candidates = [c for c in df.columns if str(c).lower() in ["data", "date"]]
+    # Usa primeira coluna como data
+    date_col = df.columns[0]
 
-    if not date_candidates:
-        raise ValueError(
-            "❌ Nenhuma coluna de data encontrada. "
-            "A base precisa ter uma coluna chamada 'Data' ou 'Date'."
-        )
+    # Remove linha de descrição (linha 0)
+    df = df.iloc[1:].copy()
 
-    date_col = date_candidates[0]
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col)
-
+    # Renomeia data
     df = df.rename(columns={date_col: "Data"})
-    return df
+    df["Data"] = pd.to_datetime(df["Data"])
 
-try:
-    df = load_data(uploaded_file)
-except Exception as e:
-    st.error(str(e))
-    st.stop()
+    # Limpa nomes das colunas
+    df.columns = [c.strip().replace("\n", " ") for c in df.columns]
 
-# =========================================================
-# IDENTIFICA COLUNAS
-# =========================================================
-meta_cols = ["Data", "Classe"]
-ret_cols = [c for c in df.columns if c not in meta_cols]
+    # Converte valores para numérico
+    for c in df.columns:
+        if c != "Data":
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-if "Classe" not in df.columns:
-    st.error("❌ A base precisa conter uma coluna chamada 'Classe'.")
-    st.stop()
+    return df.sort_values("Data").reset_index(drop=True)
 
-returns = (
-    df[["Data"] + ret_cols]
-    .set_index("Data")
-    .pct_change()
-    .dropna()
-)
+df = load_data(uploaded_file)
 
 # =========================================================
-# CLASSES
+# CLASSES OFFSHORE (FIXAS)
 # =========================================================
-classes = (
-    df[["Classe"] + ret_cols]
-    .drop_duplicates()
-    .set_index("Classe")
-)
+classes = {
+    "Cash": "Cash",
+    "High Yield": "High Yield",
+    "Investment Grade": "Investment Grade",
+    "Treasury 10y": "Treasury 10y",
+    "Equity": "Equity"
+}
+
+# =========================================================
+# RETURNS (base 100 → retorno diário)
+# =========================================================
+returns = df.set_index("Data").pct_change().dropna()
 
 # =========================================================
 # PERFIS
@@ -95,29 +83,23 @@ perfis = [
 ]
 
 # =========================================================
-# PESOS (OFFSHORE)
+# PESOS
 # =========================================================
 pesos = pd.DataFrame({
-    "Classe": classes.index,
+    "Classe": classes.keys(),
     "Ultra Conservador": [40, 25, 25, 10, 0],
     "Conservador":       [25, 25, 25, 20, 5],
     "Moderado":          [15, 20, 25, 30, 10],
     "Moderado Arrojado": [10, 15, 20, 35, 20],
     "Arrojado":          [5, 10, 15, 40, 30],
-}, index=classes.index)
+}).set_index("Classe")
 
-pesos[perfis] = pesos[perfis].div(pesos[perfis].sum()) * 100
+pesos = pesos.div(pesos.sum())
 
 # =========================================================
 # RISK FREE — TREASURY 10Y
 # =========================================================
-rf_candidates = [c for c in returns.columns if "treasury" in c.lower() and "10" in c]
-
-if not rf_candidates:
-    st.error("❌ Série Treasury 10Y não encontrada na base.")
-    st.stop()
-
-rf_col = rf_candidates[0]
+rf_col = "Treasury 10y"
 rf_daily = returns[rf_col]
 
 # =========================================================
@@ -126,9 +108,7 @@ rf_daily = returns[rf_col]
 carteiras = {}
 
 for p in perfis:
-    w = pesos[p] / 100
-    ativos = w.index.intersection(returns.columns)
-    carteiras[p] = (returns[ativos] @ w.loc[ativos]).dropna()
+    carteiras[p] = (returns[list(classes.keys())] * pesos[p]).sum(axis=1)
 
 carteiras = pd.DataFrame(carteiras)
 
@@ -141,11 +121,7 @@ perf = (1 + carteiras).cumprod() * 100
 
 fig = go.Figure()
 for c in perf.columns:
-    fig.add_trace(go.Scatter(
-        x=perf.index,
-        y=perf[c],
-        name=c
-    ))
+    fig.add_trace(go.Scatter(x=perf.index, y=perf[c], name=c))
 
 fig.update_layout(
     template="simple_white",
@@ -160,20 +136,18 @@ st.plotly_chart(fig, use_container_width=True)
 # =========================================================
 st.subheader("🧱 Alocação por Classe de Ativo")
 
-alloc = pesos.groupby("Classe")[perfis].sum()
-
 fig_alloc = go.Figure()
-for classe in alloc.index:
+for classe in pesos.index:
     fig_alloc.add_trace(go.Bar(
-        x=alloc.columns,
-        y=alloc.loc[classe],
+        x=pesos.columns,
+        y=pesos.loc[classe] * 100,
         name=classe
     ))
 
 fig_alloc.update_layout(
     barmode="stack",
-    template="simple_white",
     yaxis_title="Peso (%)",
+    template="simple_white",
     height=420
 )
 
@@ -193,7 +167,7 @@ fig_corr = px.imshow(
     zmax=1
 )
 
-fig_corr.update_layout(height=650)
+fig_corr.update_layout(height=600)
 st.plotly_chart(fig_corr, use_container_width=True)
 
 # =========================================================
@@ -230,19 +204,18 @@ st.plotly_chart(fig_eff, use_container_width=True)
 # =========================================================
 st.subheader("🚀 Análise de Eficiência (Forward-looking)")
 
-exp_returns = {}
+exp = {}
 
-for classe in pesos.index:
-    exp_returns[classe] = st.number_input(
-        f"Retorno esperado – {classe} (%)",
+for c in classes.keys():
+    exp[c] = st.number_input(
+        f"Retorno esperado – {c} (%)",
         value=5.0
     ) / 100
 
 forward = {}
 
 for p in perfis:
-    w = pesos[p] / 100
-    forward[p] = sum(w[c] * exp_returns.get(c, 0) for c in w.index)
+    forward[p] = sum(pesos.loc[c, p] * exp[c] for c in classes.keys())
 
 df_fwd = pd.DataFrame.from_dict(
     forward,
