@@ -29,22 +29,43 @@ if uploaded_file is None:
     st.stop()
 
 # =========================================================
-# LOAD DATA
+# LOAD DATA (ROBUSTO)
 # =========================================================
 @st.cache_data
 def load_data(file):
     df = pd.read_excel(file)
-    df["Data"] = pd.to_datetime(df["Data"])
-    df = df.sort_values("Data")
+
+    # Detecta coluna de data automaticamente
+    date_candidates = [c for c in df.columns if str(c).lower() in ["data", "date"]]
+
+    if not date_candidates:
+        raise ValueError(
+            "❌ Nenhuma coluna de data encontrada. "
+            "A base precisa ter uma coluna chamada 'Data' ou 'Date'."
+        )
+
+    date_col = date_candidates[0]
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col)
+
+    df = df.rename(columns={date_col: "Data"})
     return df
 
-df = load_data(uploaded_file)
+try:
+    df = load_data(uploaded_file)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
 
 # =========================================================
 # IDENTIFICA COLUNAS
 # =========================================================
 meta_cols = ["Data", "Classe"]
 ret_cols = [c for c in df.columns if c not in meta_cols]
+
+if "Classe" not in df.columns:
+    st.error("❌ A base precisa conter uma coluna chamada 'Classe'.")
+    st.stop()
 
 returns = (
     df[["Data"] + ret_cols]
@@ -90,7 +111,7 @@ pesos[perfis] = pesos[perfis].div(pesos[perfis].sum()) * 100
 # =========================================================
 # RISK FREE — TREASURY 10Y
 # =========================================================
-rf_candidates = [c for c in returns.columns if "Treasury 10y" in c]
+rf_candidates = [c for c in returns.columns if "treasury" in c.lower() and "10" in c]
 
 if not rf_candidates:
     st.error("❌ Série Treasury 10Y não encontrada na base.")
