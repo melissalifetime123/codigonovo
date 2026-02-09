@@ -2,151 +2,121 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 
-# ======================================================
-# CONFIGURAÇÃO
-# ======================================================
-st.set_page_config(page_title="Offshore Asset Allocation", layout="wide")
-
-st.title("Offshore Asset Allocation")
-st.caption(
-    "Análise de alocação offshore em USD • dados diários • índices base 100 • Treasury 10Y como risk-free"
+# =========================================================
+# CONFIG
+# =========================================================
+st.set_page_config(
+    page_title="Asset Allocation Offshore",
+    layout="wide"
 )
 
-# ======================================================
-# PERFIS
-# ======================================================
+st.title("🌍 Asset Allocation – Offshore")
+
+# =========================================================
+# LOAD DATA
+# =========================================================
+@st.cache_data
+def load_data():
+    df = pd.read_excel("database.xlsx")
+    df["Data"] = pd.to_datetime(df["Data"])
+    df = df.sort_values("Data")
+    return df
+
+df = load_data()
+
+# =========================================================
+# IDENTIFICA COLUNAS
+# =========================================================
+meta_cols = ["Data", "Classe"]
+ret_cols = [c for c in df.columns if c not in meta_cols]
+
+returns = df[["Data"] + ret_cols].set_index("Data").pct_change().dropna()
+
+# =========================================================
+# CLASSES & PERFIS
+# =========================================================
+classes = df[["Classe"] + ret_cols].drop_duplicates().set_index("Classe")
+
 perfis = [
     "Ultra Conservador",
     "Conservador",
     "Moderado",
-    "Mod Arroj",
+    "Moderado Arrojado",
     "Arrojado"
 ]
 
-# ======================================================
-# SIDEBAR
-# ======================================================
-st.sidebar.header("Configurações")
-
-arquivo = st.sidebar.file_uploader(
-    "Upload da base offshore",
-    type=["xlsx", "csv"]
-)
-
-if arquivo is None:
-    st.info("Faça o upload da base para iniciar.")
-    st.stop()
-
-# ======================================================
-# LEITURA DA BASE
-# ======================================================
-df = pd.read_excel(
-    arquivo,
-    header=[0, 1],
-    index_col=0,
-    parse_dates=True
-)
-
-df.columns = pd.MultiIndex.from_tuples(
-    [(str(a).strip(), str(b).strip()) for a, b in df.columns]
-)
-
-df = df.apply(pd.to_numeric, errors="coerce").dropna(how="all")
-
-# ======================================================
-# JANELA DE ANÁLISE
-# ======================================================
-inicio, fim = st.sidebar.slider(
-    "Janela de análise",
-    min_value=df.index.min().to_pydatetime(),
-    max_value=df.index.max().to_pydatetime(),
-    value=(df.index.min().to_pydatetime(), df.index.max().to_pydatetime())
-)
-
-df = df.loc[inicio:fim]
-
-# ======================================================
-# RETORNOS E ANUALIZAÇÃO
-# ======================================================
-ret = df.pct_change().dropna()
-
-freq_days = ret.index.to_series().diff().median().days
-ann_factor = int(round(365 / freq_days))
-
-# ======================================================
-# TREASURY 10Y — RISK FREE
-# ======================================================
-rf_cols = [
-    c for c in ret.columns
-    if "TREASURY" in c[0].upper() or "10Y" in c[0].upper()
-]
-
-if rf_cols:
-    rf_ret = ret[rf_cols[0]]
-    rf_curve = (1 + rf_ret).cumprod() - 1
-    rf_ann = (1 + rf_curve.iloc[-1]) ** (ann_factor / len(rf_ret)) - 1
-else:
-    rf_curve = pd.Series(0.0, index=ret.index)
-    rf_ann = 0.0
-
-# ======================================================
-# PESOS DAS CARTEIRAS
-# ======================================================
-st.markdown("---")
-st.subheader("Alocação por Perfil")
-st.caption("Pesos em %. A soma recomendada por perfil é 100%.")
-
+# =========================================================
+# PESOS (OFFSHORE)
+# =========================================================
 pesos = pd.DataFrame({
-    "Classe": [c[0] for c in ret.columns],
-    "Ativo": [c[1] for c in ret.columns]
-})
+    "Classe": classes.index,
+    "Ultra Conservador": [40, 25, 25, 10, 0],
+    "Conservador":       [25, 25, 25, 20, 5],
+    "Moderado":          [15, 20, 25, 30, 10],
+    "Moderado Arrojado": [10, 15, 20, 35, 20],
+    "Arrojado":          [5, 10, 15, 40, 30],
+}, index=classes.index)
+
+# normaliza
+pesos[perfis] = pesos[perfis].div(pesos[perfis].sum()) * 100
+
+# =========================================================
+# RISK FREE — TREASURY 10Y
+# =========================================================
+rf_col = [c for c in returns.columns if "Treasury 10y" in c][0]
+rf_daily = returns[rf_col]
+
+# =========================================================
+# CARTEIRAS
+# =========================================================
+carteiras = {}
 
 for p in perfis:
-    pesos[p] = 0.0
+    w = pesos[p] / 100
+    ativos = w.index.intersection(returns.columns)
+    carteiras[p] = (returns[ativos] @ w.loc[ativos]).dropna()
 
-pesos = st.data_editor(
-    pesos,
-    hide_index=True,
-    use_container_width=True
+carteiras = pd.DataFrame(carteiras)
+
+# =========================================================
+# PERFORMANCE ACUMULADA
+# =========================================================
+st.subheader("📈 Performance das Carteiras")
+
+perf = (1 + carteiras).cumprod() * 100
+
+fig = go.Figure()
+for c in perf.columns:
+    fig.add_trace(go.Scatter(
+        x=perf.index,
+        y=perf[c],
+        name=c
+    ))
+
+fig.update_layout(
+    template="simple_white",
+    yaxis_title="Base 100",
+    height=450
 )
 
-somas = pesos[perfis].sum()
-cols = st.columns(len(perfis))
+st.plotly_chart(fig, use_container_width=True)
 
-for i, p in enumerate(perfis):
-    if 99.5 <= somas[p] <= 100.5:
-        cols[i].success(f"{p}: {somas[p]:.1f}%")
-    else:
-        cols[i].warning(f"{p}: {somas[p]:.1f}%")
+# =========================================================
+# ALOCAÇÃO POR CLASSE
+# =========================================================
+st.subheader("🧱 Alocação por Classe de Ativo")
 
-# ======================================================
-# ALOCAÇÃO POR CLASSE DE ATIVO
-# ======================================================
-st.markdown("---")
-st.subheader("Alocação por Classe de Ativo")
-
-aloc = {}
-for p in perfis:
-    aloc[p] = pesos.groupby("Classe")[p].sum()
-
-df_aloc = pd.DataFrame(aloc).fillna(0)
-
-st.dataframe(
-    df_aloc.style.format("{:.1f}%"),
-    use_container_width=True
-)
+alloc = pesos.groupby("Classe")[perfis].sum()
 
 fig_alloc = go.Figure()
-
-for classe in df_aloc.index:
-    fig_alloc.add_trace(
-        go.Bar(
-            name=classe,
-            x=df_aloc.columns,
-            y=df_aloc.loc[classe]
-        )
-    )
+for classe in alloc.index:
+    fig_alloc.add_trace(go.Bar(
+        x=alloc.columns,
+        y=alloc.loc[classe],
+        name=classe
+    ))
 
 fig_alloc.update_layout(
     barmode="stack",
@@ -157,191 +127,93 @@ fig_alloc.update_layout(
 
 st.plotly_chart(fig_alloc, use_container_width=True)
 
-# ======================================================
-# MÉTRICAS E PERFORMANCE DAS CARTEIRAS
-# ======================================================
-metrics = {}
-perf = {}
-
-cov = ret.cov() * ann_factor
-
-for p in perfis:
-    w = pesos[p].values / 100
-    r_p = ret.dot(w)
-
-    if w.sum() > 0:
-        r_ann = (1 + (1 + r_p).prod() - 1) ** (ann_factor / len(r_p)) - 1
-        vol = np.sqrt(w.T @ cov @ w)
-        sharpe = (r_ann - rf_ann) / vol if vol > 0 else np.nan
-    else:
-        r_ann = 0.0
-        vol = 0.0
-        sharpe = np.nan
-
-    metrics[p] = {
-        "Retorno Anualizado": r_ann,
-        "Volatilidade": vol,
-        "Sharpe (vs Treasury 10Y)": sharpe
-    }
-
-    perf[p] = (1 + r_p).cumprod() - 1
-
-st.markdown("---")
-st.subheader("Métricas das Carteiras")
-
-df_metrics = pd.DataFrame(metrics).T
-
-st.dataframe(
-    df_metrics.style.format({
-        "Retorno Anualizado": "{:.2%}",
-        "Volatilidade": "{:.2%}",
-        "Sharpe (vs Treasury 10Y)": "{:.2f}"
-    }),
-    use_container_width=True
-)
-
-# ======================================================
-# PERFORMANCE HISTÓRICA
-# ======================================================
-st.markdown("---")
-st.subheader("Performance das Carteiras")
-
-fig_perf = go.Figure()
-
-fig_perf.add_trace(
-    go.Scatter(
-        x=rf_curve.index,
-        y=rf_curve,
-        name="Treasury 10Y",
-        line=dict(dash="dot")
-    )
-)
-
-for p in perfis:
-    fig_perf.add_trace(
-        go.Scatter(
-            x=perf[p].index,
-            y=perf[p],
-            name=p
-        )
-    )
-
-fig_perf.update_layout(
-    template="simple_white",
-    hovermode="x unified",
-    yaxis_tickformat=".1%",
-    height=450
-)
-
-st.plotly_chart(fig_perf, use_container_width=True)
-
-# ======================================================
+# =========================================================
 # MATRIZ DE CORRELAÇÃO
-# ======================================================
-st.markdown("---")
-st.subheader("Matriz de Correlação")
+# =========================================================
+st.subheader("🔗 Matriz de Correlação")
 
-corr = ret.corr()
+corr = returns.corr()
 
-fig_corr = go.Figure(
-    data=go.Heatmap(
-        z=corr.values,
-        x=[c[0] for c in corr.columns],
-        y=[c[0] for c in corr.columns],
-        colorscale="RdBu",
-        zmin=-1,
-        zmax=1
-    )
+fig_corr = px.imshow(
+    corr,
+    color_continuous_scale="RdYlGn",
+    zmin=-1,
+    zmax=1
 )
 
-fig_corr.update_layout(height=500)
+fig_corr.update_layout(height=650)
 st.plotly_chart(fig_corr, use_container_width=True)
 
-# ======================================================
+# =========================================================
 # EFICIÊNCIA HISTÓRICA
-# ======================================================
-st.markdown("---")
-st.subheader("Análise de Eficiência (Histórica)")
+# =========================================================
+st.subheader("🎯 Análise de Eficiência (Histórico)")
 
-ret_ann_assets = (1 + ret).prod() ** (ann_factor / len(ret)) - 1
-vol_ann_assets = ret.std() * np.sqrt(ann_factor)
+ann_factor = 252
 
-cov_ann = ret.cov() * ann_factor
-n_assets = len(ret.columns)
-n_sim = 4000
+stats = pd.DataFrame(index=carteiras.columns)
+stats["Retorno (%)"] = carteiras.mean() * ann_factor * 100
+stats["Volatilidade (%)"] = carteiras.std() * np.sqrt(ann_factor) * 100
+stats["Sharpe"] = (
+    (carteiras.mean() - rf_daily.mean()) /
+    carteiras.std()
+) * np.sqrt(ann_factor)
 
-w_sim = np.random.dirichlet(np.ones(n_assets), n_sim)
-ret_sim = w_sim @ ret_ann_assets.values
-vol_sim = np.sqrt(np.einsum("ij,jk,ik->i", w_sim, cov_ann.values, w_sim))
+st.dataframe(stats.style.format("{:.2f}"))
 
-fig_eff = go.Figure()
-
-fig_eff.add_trace(
-    go.Scatter(
-        x=vol_sim,
-        y=ret_sim,
-        mode="markers",
-        marker=dict(size=4, opacity=0.3),
-        name="Portfólios Simulados"
-    )
+fig_eff = px.scatter(
+    stats,
+    x="Volatilidade (%)",
+    y="Retorno (%)",
+    text=stats.index
 )
 
-fig_eff.add_trace(
-    go.Scatter(
-        x=vol_ann_assets,
-        y=ret_ann_assets,
-        mode="markers+text",
-        text=[c[0] for c in ret.columns],
-        textposition="top center",
-        name="Ativos"
-    )
-)
-
-fig_eff.update_layout(
-    xaxis_title="Volatilidade",
-    yaxis_title="Retorno",
-    height=500
-)
+fig_eff.update_traces(textposition="top center")
+fig_eff.update_layout(template="simple_white", height=450)
 
 st.plotly_chart(fig_eff, use_container_width=True)
 
-# ======================================================
+# =========================================================
 # EFICIÊNCIA FORWARD-LOOKING
-# ======================================================
-st.markdown("---")
-st.subheader("Análise de Eficiência (Forward-looking)")
-st.caption("Retornos esperados definidos manualmente")
+# =========================================================
+st.subheader("🚀 Análise de Eficiência (Forward-looking)")
 
-ret_fwd = {}
+st.caption("Insira expectativas manuais de retorno anual por classe")
 
-for c in ret.columns:
-    ret_fwd[c] = st.number_input(
-        f"Retorno esperado — {c[0]}",
-        value=float(ret_ann_assets[c]),
-        step=0.005
-    )
+exp_returns = {}
 
-ret_fwd = np.array(list(ret_fwd.values()))
+for classe in pesos.index:
+    exp_returns[classe] = st.number_input(
+        f"Retorno esperado – {classe} (%)",
+        value=5.0
+    ) / 100
 
-ret_sim_fwd = w_sim @ ret_fwd
-vol_sim_fwd = vol_sim
+forward = {}
 
-fig_fwd = go.Figure()
+for p in perfis:
+    w = pesos[p] / 100
+    forward[p] = sum(w[c] * exp_returns.get(c, 0) for c in w.index)
 
-fig_fwd.add_trace(
-    go.Scatter(
-        x=vol_sim_fwd,
-        y=ret_sim_fwd,
-        mode="markers",
-        marker=dict(size=4, opacity=0.3),
-        name="Fronteira Forward-looking"
-    )
+df_fwd = pd.DataFrame.from_dict(
+    forward,
+    orient="index",
+    columns=["Retorno Esperado (%)"]
+) * 100
+
+st.dataframe(df_fwd.style.format("{:.2f}"))
+
+fig_fwd = px.scatter(
+    df_fwd,
+    y="Retorno Esperado (%)",
+    x=df_fwd.index,
+    text=df_fwd.index
 )
 
+fig_fwd.update_traces(textposition="top center")
 fig_fwd.update_layout(
-    xaxis_title="Volatilidade",
-    yaxis_title="Retorno Esperado",
-    height=500
+    template="simple_white",
+    height=400,
+    xaxis_title=""
 )
 
 st.plotly_chart(fig_fwd, use_container_width=True)
