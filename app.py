@@ -3,17 +3,17 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# ===============================
+# ======================================================
 # CONFIG
-# ===============================
+# ======================================================
 st.set_page_config(page_title="Offshore Asset Allocation", layout="wide")
 
 st.title("Offshore Asset Allocation")
-st.caption("Análise de carteiras offshore em USD • índices base 100")
+st.caption("Análise de alocação offshore em USD • índices base 100 • Treasury 10Y como risk-free")
 
-# ===============================
+# ======================================================
 # PERFIS
-# ===============================
+# ======================================================
 perfis = [
     "Ultra Conservador",
     "Conservador",
@@ -22,23 +22,23 @@ perfis = [
     "Arrojado"
 ]
 
-# ===============================
+# ======================================================
 # SIDEBAR
-# ===============================
+# ======================================================
 st.sidebar.header("Configurações")
 
 arquivo = st.sidebar.file_uploader(
-    "Upload da base",
+    "Upload da base offshore",
     type=["xlsx", "csv"]
 )
 
 if arquivo is None:
-    st.info("Faça o upload da base para iniciar.")
+    st.info("Faça o upload da base para iniciar a análise.")
     st.stop()
 
-# ===============================
+# ======================================================
 # LEITURA DOS DADOS
-# ===============================
+# ======================================================
 df = pd.read_excel(
     arquivo,
     header=[0, 1],
@@ -52,9 +52,9 @@ df.columns = pd.MultiIndex.from_tuples(
 
 df = df.apply(pd.to_numeric, errors="coerce").dropna(how="all")
 
-# ===============================
-# JANELA DE TEMPO
-# ===============================
+# ======================================================
+# JANELA DE ANÁLISE
+# ======================================================
 inicio, fim = st.sidebar.slider(
     "Janela de análise",
     min_value=df.index.min().to_pydatetime(),
@@ -64,18 +64,21 @@ inicio, fim = st.sidebar.slider(
 
 df = df.loc[inicio:fim]
 
-# ===============================
-# RETORNOS
-# ===============================
+# ======================================================
+# RETORNOS E ANUALIZAÇÃO
+# ======================================================
 ret = df.pct_change().dropna()
 
-freq = ret.index.to_series().diff().median().days
-ann_factor = int(round(365 / freq))
+freq_days = ret.index.to_series().diff().median().days
+ann_factor = int(round(365 / freq_days))
 
-# ===============================
-# TREASURY 10Y (RISK FREE)
-# ===============================
-treasury_cols = [c for c in ret.columns if "TREASURY" in c[0].upper() or "10Y" in c[0].upper()]
+# ======================================================
+# TREASURY 10Y (RISK-FREE)
+# ======================================================
+treasury_cols = [
+    c for c in ret.columns
+    if "TREASURY" in c[0].upper() or "10Y" in c[0].upper()
+]
 
 if treasury_cols:
     rf = ret[treasury_cols[0]]
@@ -85,10 +88,12 @@ else:
     rf_curve = pd.Series(0.0, index=ret.index)
     rf_ann = 0.0
 
-# ===============================
-# PESOS
-# ===============================
+# ======================================================
+# PESOS DAS CARTEIRAS
+# ======================================================
+st.markdown("---")
 st.subheader("Alocação por Perfil")
+st.caption("Pesos em %. A soma recomendada por perfil é 100%.")
 
 pesos = pd.DataFrame({
     "Classe": [c[0] for c in ret.columns],
@@ -109,9 +114,45 @@ for i, p in enumerate(perfis):
     else:
         cols[i].warning(f"{p}: {somas[p]:.1f}%")
 
-# ===============================
-# CÁLCULOS
-# ===============================
+# ======================================================
+# ALOCAÇÃO POR CLASSE DE ATIVO
+# ======================================================
+st.markdown("---")
+st.subheader("Alocação por Classe de Ativo")
+
+aloc_classe = {}
+for p in perfis:
+    aloc_classe[p] = pesos.groupby("Classe")[p].sum()
+
+df_aloc = pd.DataFrame(aloc_classe).fillna(0)
+
+st.dataframe(
+    df_aloc.style.format("{:.1f}%"),
+    use_container_width=True
+)
+
+fig_alloc = go.Figure()
+for classe in df_aloc.index:
+    fig_alloc.add_trace(
+        go.Bar(
+            name=classe,
+            x=df_aloc.columns,
+            y=df_aloc.loc[classe]
+        )
+    )
+
+fig_alloc.update_layout(
+    barmode="stack",
+    template="simple_white",
+    yaxis_title="Peso (%)",
+    height=420
+)
+
+st.plotly_chart(fig_alloc, use_container_width=True)
+
+# ======================================================
+# CÁLCULO DAS CARTEIRAS
+# ======================================================
 metrics = {}
 perf = {}
 
@@ -133,31 +174,34 @@ for p in perfis:
     metrics[p] = {
         "Retorno Anualizado": r_ann,
         "Volatilidade": vol,
-        "Sharpe": sharpe
+        "Sharpe (vs Treasury 10Y)": sharpe
     }
 
     perf[p] = (1 + r).cumprod() - 1
 
-# ===============================
-# MÉTRICAS
-# ===============================
-st.subheader("Métricas")
+# ======================================================
+# MÉTRICAS DAS CARTEIRAS
+# ======================================================
+st.markdown("---")
+st.subheader("Métricas das Carteiras")
 
-df_m = pd.DataFrame(metrics).T
+df_metrics = pd.DataFrame(metrics).T
 
 st.dataframe(
-    df_m.style.format({
+    df_metrics.style.format({
         "Retorno Anualizado": "{:.2%}",
         "Volatilidade": "{:.2%}",
-        "Sharpe": "{:.2f}"
+        "Sharpe (vs Treasury 10Y)": "{:.2f}"
     }),
     use_container_width=True
 )
 
-# ===============================
-# PERFORMANCE
-# ===============================
-st.subheader("Performance Histórica")
+# ======================================================
+# PERFORMANCE DAS CARTEIRAS
+# ======================================================
+st.markdown("---")
+st.subheader("Performance das Carteiras")
+st.caption("Curvas acumuladas em USD • base 100")
 
 fig = go.Figure()
 
@@ -183,7 +227,7 @@ fig.update_layout(
     template="simple_white",
     hovermode="x unified",
     yaxis_tickformat=".1%",
-    height=420
+    height=450
 )
 
 st.plotly_chart(fig, use_container_width=True)
