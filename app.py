@@ -4,159 +4,213 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 
-# =========================================================
+# =========================
 # CONFIG
-# =========================================================
+# =========================
 st.set_page_config(
     page_title="Asset Allocation Offshore",
     layout="wide"
 )
 
-st.title("🌍 Asset Allocation – Offshore")
+st.title("📊 Asset Allocation | Offshore")
 
-# =========================================================
-# UPLOAD
-# =========================================================
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
+
+@st.cache_data
+def load_data(file):
+    if file.name.endswith(".csv"):
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file)
+
+    # Detecta coluna de data automaticamente
+    date_col = None
+    for c in df.columns:
+        if "date" in c.lower() or "data" in c.lower():
+            date_col = c
+            break
+
+    if date_col is None:
+        st.error("❌ Nenhuma coluna de data encontrada.")
+        st.stop()
+
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col)
+    df = df.set_index(date_col)
+
+    return df
+
+
+def calc_returns(price_df):
+    return price_df.pct_change().dropna()
+
+
+def annualize_return(r, freq=252):
+    return (1 + r.mean()) ** freq - 1
+
+
+def annualize_vol(r, freq=252):
+    return r.std() * np.sqrt(freq)
+
+
+def sharpe_ratio(r, rf):
+    excess = r.sub(rf, axis=0)
+    return annualize_return(excess) / annualize_vol(excess)
+
+
+# =========================
+# SIDEBAR
+# =========================
+
+st.sidebar.header("⚙️ Configurações")
+
 uploaded_file = st.sidebar.file_uploader(
-    "📂 Upload da base (Excel)",
-    type=["xlsx"]
+    "Upload da Base Master",
+    type=["xlsx", "csv"]
 )
 
 if uploaded_file is None:
-    st.info("⬅️ Faça upload da base para iniciar.")
+    st.info("⬅️ Faça upload da base para começar")
     st.stop()
-
-# =========================================================
-# LOAD DATA — AJUSTADO À SUA BASE
-# =========================================================
-@st.cache_data
-def load_data(file):
-    df = pd.read_excel(file)
-
-    # Usa primeira coluna como data
-    date_col = df.columns[0]
-
-    # Remove linha de descrição (linha 0)
-    df = df.iloc[1:].copy()
-
-    # Renomeia data
-    df = df.rename(columns={date_col: "Data"})
-    df["Data"] = pd.to_datetime(df["Data"])
-
-    # Limpa nomes das colunas
-    df.columns = [c.strip().replace("\n", " ") for c in df.columns]
-
-    # Converte valores para numérico
-    for c in df.columns:
-        if c != "Data":
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    return df.sort_values("Data").reset_index(drop=True)
 
 df = load_data(uploaded_file)
 
-# =========================================================
-# CLASSES OFFSHORE (FIXAS)
-# =========================================================
-classes = {
-    "Cash": "Cash",
-    "High Yield": "High Yield",
-    "Investment Grade": "Investment Grade",
-    "Treasury 10y": "Treasury 10y",
-    "Equity": "Equity"
+# =========================
+# MAPEAMENTO DE CLASSES
+# =========================
+
+class_map = {
+    "Cash": ["US:USG_EFFR"],
+    "High Yield": ["US:HYG"],
+    "Investment Grade": ["IE:AGGU"],
+    "Treasury 10y": ["IE:IE00BYSZ5V04"],
+    "Equity": ["US:MSCI_WORLD"],
+    "Alternatives": []  # placeholder
 }
 
-# =========================================================
-# RETURNS (base 100 → retorno diário)
-# =========================================================
-returns = df.set_index("Data").pct_change().dropna()
+# Filtra colunas existentes
+assets = {
+    k: [c for c in v if c in df.columns]
+    for k, v in class_map.items()
+}
 
-# =========================================================
-# PERFIS
-# =========================================================
-perfis = [
-    "Ultra Conservador",
-    "Conservador",
-    "Moderado",
-    "Moderado Arrojado",
-    "Arrojado"
-]
+price_df = df[[c for cols in assets.values() for c in cols]]
 
-# =========================================================
-# PESOS
-# =========================================================
-pesos = pd.DataFrame({
-    "Classe": classes.keys(),
-    "Ultra Conservador": [40, 25, 25, 10, 0],
-    "Conservador":       [25, 25, 25, 20, 5],
-    "Moderado":          [15, 20, 25, 30, 10],
-    "Moderado Arrojado": [10, 15, 20, 35, 20],
-    "Arrojado":          [5, 10, 15, 40, 30],
-}).set_index("Classe")
+returns = calc_returns(price_df)
 
-pesos = pesos.div(pesos.sum())
+# Risk-free = Treasury 10Y
+rf_series = returns[assets["Treasury 10y"][0]] if assets["Treasury 10y"] else returns.mean(axis=1) * 0
 
-# =========================================================
-# RISK FREE — TREASURY 10Y
-# =========================================================
-rf_col = "Treasury 10y"
-rf_daily = returns[rf_col]
+# =========================
+# PERFIS OFFSHORE
+# =========================
 
-# =========================================================
+profiles = {
+    "Ultra Conservador": {
+        "Cash": 0.30,
+        "Investment Grade": 0.40,
+        "Treasury 10y": 0.30
+    },
+    "Conservador": {
+        "Cash": 0.20,
+        "Investment Grade": 0.40,
+        "Equity": 0.40
+    },
+    "Moderado": {
+        "Investment Grade": 0.30,
+        "Equity": 0.70
+    },
+    "Moderado Arrojado": {
+        "Equity": 0.85,
+        "High Yield": 0.15
+    },
+    "Arrojado": {
+        "Equity": 1.00
+    }
+}
+
+# =========================
 # CARTEIRAS
-# =========================================================
-carteiras = {}
+# =========================
 
-for p in perfis:
-    carteiras[p] = (returns[list(classes.keys())] * pesos[p]).sum(axis=1)
+portfolio_returns = {}
 
-carteiras = pd.DataFrame(carteiras)
+for p, weights in profiles.items():
+    r = 0
+    for cls, w in weights.items():
+        if assets[cls]:
+            r += returns[assets[cls]].mean(axis=1) * w
+    portfolio_returns[p] = r
 
-# =========================================================
-# PERFORMANCE
-# =========================================================
-st.subheader("📈 Performance das Carteiras")
+portfolio_df = pd.DataFrame(portfolio_returns)
 
-perf = (1 + carteiras).cumprod() * 100
+# =========================
+# RESULTADOS CONSOLIDADOS
+# =========================
 
-fig = go.Figure()
-for c in perf.columns:
-    fig.add_trace(go.Scatter(x=perf.index, y=perf[c], name=c))
+st.subheader("📌 Resultados Consolidados")
 
-fig.update_layout(
-    template="simple_white",
-    yaxis_title="Base 100",
-    height=450
+stats = pd.DataFrame(index=["Retorno Anualizado", "Volatilidade", "Sharpe"])
+
+stats.loc["Retorno Anualizado"] = annualize_return(portfolio_df)
+stats.loc["Volatilidade"] = annualize_vol(portfolio_df)
+stats.loc["Sharpe"] = sharpe_ratio(portfolio_df, rf_series)
+
+st.dataframe(stats.style.format("{:.2%}"))
+
+# =========================
+# ALOCAÇÃO POR CLASSE
+# =========================
+
+st.subheader("🏢 Alocação por Classe de Ativo")
+
+alloc_df = pd.DataFrame(profiles).fillna(0)
+
+fig_alloc = px.bar(
+    alloc_df.T,
+    barmode="stack"
 )
-
-st.plotly_chart(fig, use_container_width=True)
-
-# =========================================================
-# ALOCAÇÃO
-# =========================================================
-st.subheader("🧱 Alocação por Classe de Ativo")
-
-fig_alloc = go.Figure()
-for classe in pesos.index:
-    fig_alloc.add_trace(go.Bar(
-        x=pesos.columns,
-        y=pesos.loc[classe] * 100,
-        name=classe
-    ))
-
-fig_alloc.update_layout(
-    barmode="stack",
-    yaxis_title="Peso (%)",
-    template="simple_white",
-    height=420
-)
-
 st.plotly_chart(fig_alloc, use_container_width=True)
 
-# =========================================================
+# =========================
+# PERFORMANCE DAS CARTEIRAS
+# =========================
+
+st.subheader("📈 Performance das Carteiras")
+
+cum_perf = (1 + portfolio_df).cumprod() - 1
+
+fig_perf = go.Figure()
+for c in cum_perf.columns:
+    fig_perf.add_trace(go.Scatter(
+        x=cum_perf.index,
+        y=cum_perf[c],
+        name=c
+    ))
+
+st.plotly_chart(fig_perf, use_container_width=True)
+
+# =========================
+# ESTATÍSTICAS DOS ATIVOS
+# =========================
+
+st.subheader("📊 Estatísticas das Séries Individuais")
+
+asset_stats = pd.DataFrame({
+    "Retorno": annualize_return(returns),
+    "Vol": annualize_vol(returns),
+    "Sharpe": sharpe_ratio(returns, rf_series)
+})
+
+st.dataframe(asset_stats.style.format("{:.2%}"))
+
+# =========================
 # MATRIZ DE CORRELAÇÃO
-# =========================================================
-st.subheader("🔗 Matriz de Correlação")
+# =========================
+
+st.subheader("🎯 Matriz de Correlação")
 
 corr = returns.corr()
 
@@ -167,72 +221,33 @@ fig_corr = px.imshow(
     zmax=1
 )
 
-fig_corr.update_layout(height=600)
 st.plotly_chart(fig_corr, use_container_width=True)
 
-# =========================================================
+# =========================
 # EFICIÊNCIA HISTÓRICA
-# =========================================================
-st.subheader("🎯 Análise de Eficiência (Histórico)")
+# =========================
 
-ann = 252
+st.subheader("🔎 Análise de Eficiência (Histórico)")
 
-stats = pd.DataFrame(index=carteiras.columns)
-stats["Retorno (%)"] = carteiras.mean() * ann * 100
-stats["Volatilidade (%)"] = carteiras.std() * np.sqrt(ann) * 100
-stats["Sharpe"] = (
-    (carteiras.mean() - rf_daily.mean()) /
-    carteiras.std()
-) * np.sqrt(ann)
-
-st.dataframe(stats.style.format("{:.2f}"))
+eff_df = pd.DataFrame({
+    "Retorno": annualize_return(portfolio_df),
+    "Risco": annualize_vol(portfolio_df)
+})
 
 fig_eff = px.scatter(
-    stats,
-    x="Volatilidade (%)",
-    y="Retorno (%)",
-    text=stats.index
+    eff_df,
+    x="Risco",
+    y="Retorno",
+    text=eff_df.index
 )
-
-fig_eff.update_traces(textposition="top center")
-fig_eff.update_layout(template="simple_white", height=450)
 
 st.plotly_chart(fig_eff, use_container_width=True)
 
-# =========================================================
-# EFICIÊNCIA FORWARD
-# =========================================================
+# =========================
+# EFICIÊNCIA FORWARD-LOOKING
+# =========================
+
 st.subheader("🚀 Análise de Eficiência (Forward-looking)")
 
-exp = {}
+st.info("📌 Estrutura pronta. Retornos esperados podem ser adicionados manualmente futuramente.")
 
-for c in classes.keys():
-    exp[c] = st.number_input(
-        f"Retorno esperado – {c} (%)",
-        value=5.0
-    ) / 100
-
-forward = {}
-
-for p in perfis:
-    forward[p] = sum(pesos.loc[c, p] * exp[c] for c in classes.keys())
-
-df_fwd = pd.DataFrame.from_dict(
-    forward,
-    orient="index",
-    columns=["Retorno Esperado (%)"]
-) * 100
-
-st.dataframe(df_fwd.style.format("{:.2f}"))
-
-fig_fwd = px.scatter(
-    df_fwd,
-    y="Retorno Esperado (%)",
-    x=df_fwd.index,
-    text=df_fwd.index
-)
-
-fig_fwd.update_traces(textposition="top center")
-fig_fwd.update_layout(template="simple_white", height=400)
-
-st.plotly_chart(fig_fwd, use_container_width=True)
