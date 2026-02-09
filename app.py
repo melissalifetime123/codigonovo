@@ -15,16 +15,30 @@ st.set_page_config(
 st.title("🌍 Asset Allocation – Offshore")
 
 # =========================================================
+# UPLOAD BASE
+# =========================================================
+st.sidebar.header("📂 Base de Dados")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Faça upload da base (Excel)",
+    type=["xlsx"]
+)
+
+if uploaded_file is None:
+    st.info("⬅️ Faça upload da base de dados para iniciar as análises.")
+    st.stop()
+
+# =========================================================
 # LOAD DATA
 # =========================================================
 @st.cache_data
-def load_data():
-    df = pd.read_excel("database.xlsx")
+def load_data(file):
+    df = pd.read_excel(file)
     df["Data"] = pd.to_datetime(df["Data"])
     df = df.sort_values("Data")
     return df
 
-df = load_data()
+df = load_data(uploaded_file)
 
 # =========================================================
 # IDENTIFICA COLUNAS
@@ -32,13 +46,25 @@ df = load_data()
 meta_cols = ["Data", "Classe"]
 ret_cols = [c for c in df.columns if c not in meta_cols]
 
-returns = df[["Data"] + ret_cols].set_index("Data").pct_change().dropna()
+returns = (
+    df[["Data"] + ret_cols]
+    .set_index("Data")
+    .pct_change()
+    .dropna()
+)
 
 # =========================================================
-# CLASSES & PERFIS
+# CLASSES
 # =========================================================
-classes = df[["Classe"] + ret_cols].drop_duplicates().set_index("Classe")
+classes = (
+    df[["Classe"] + ret_cols]
+    .drop_duplicates()
+    .set_index("Classe")
+)
 
+# =========================================================
+# PERFIS
+# =========================================================
 perfis = [
     "Ultra Conservador",
     "Conservador",
@@ -59,13 +85,18 @@ pesos = pd.DataFrame({
     "Arrojado":          [5, 10, 15, 40, 30],
 }, index=classes.index)
 
-# normaliza
 pesos[perfis] = pesos[perfis].div(pesos[perfis].sum()) * 100
 
 # =========================================================
 # RISK FREE — TREASURY 10Y
 # =========================================================
-rf_col = [c for c in returns.columns if "Treasury 10y" in c][0]
+rf_candidates = [c for c in returns.columns if "Treasury 10y" in c]
+
+if not rf_candidates:
+    st.error("❌ Série Treasury 10Y não encontrada na base.")
+    st.stop()
+
+rf_col = rf_candidates[0]
 rf_daily = returns[rf_col]
 
 # =========================================================
@@ -81,7 +112,7 @@ for p in perfis:
 carteiras = pd.DataFrame(carteiras)
 
 # =========================================================
-# PERFORMANCE ACUMULADA
+# PERFORMANCE
 # =========================================================
 st.subheader("📈 Performance das Carteiras")
 
@@ -104,7 +135,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
-# ALOCAÇÃO POR CLASSE
+# ALOCAÇÃO
 # =========================================================
 st.subheader("🧱 Alocação por Classe de Ativo")
 
@@ -149,15 +180,15 @@ st.plotly_chart(fig_corr, use_container_width=True)
 # =========================================================
 st.subheader("🎯 Análise de Eficiência (Histórico)")
 
-ann_factor = 252
+ann = 252
 
 stats = pd.DataFrame(index=carteiras.columns)
-stats["Retorno (%)"] = carteiras.mean() * ann_factor * 100
-stats["Volatilidade (%)"] = carteiras.std() * np.sqrt(ann_factor) * 100
+stats["Retorno (%)"] = carteiras.mean() * ann * 100
+stats["Volatilidade (%)"] = carteiras.std() * np.sqrt(ann) * 100
 stats["Sharpe"] = (
     (carteiras.mean() - rf_daily.mean()) /
     carteiras.std()
-) * np.sqrt(ann_factor)
+) * np.sqrt(ann)
 
 st.dataframe(stats.style.format("{:.2f}"))
 
@@ -174,11 +205,9 @@ fig_eff.update_layout(template="simple_white", height=450)
 st.plotly_chart(fig_eff, use_container_width=True)
 
 # =========================================================
-# EFICIÊNCIA FORWARD-LOOKING
+# EFICIÊNCIA FORWARD
 # =========================================================
 st.subheader("🚀 Análise de Eficiência (Forward-looking)")
-
-st.caption("Insira expectativas manuais de retorno anual por classe")
 
 exp_returns = {}
 
@@ -210,10 +239,6 @@ fig_fwd = px.scatter(
 )
 
 fig_fwd.update_traces(textposition="top center")
-fig_fwd.update_layout(
-    template="simple_white",
-    height=400,
-    xaxis_title=""
-)
+fig_fwd.update_layout(template="simple_white", height=400)
 
 st.plotly_chart(fig_fwd, use_container_width=True)
