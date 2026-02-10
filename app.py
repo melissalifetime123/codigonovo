@@ -5,249 +5,113 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 # =========================
-# CONFIG
+# CONFIGURAÇÃO DA PÁGINA
 # =========================
-st.set_page_config(
-    page_title="Asset Allocation Offshore",
-    layout="wide"
-)
-
-st.title("📊 Asset Allocation | Offshore")
+st.set_page_config(page_title="Asset Allocation Offshore", layout="wide")
+st.title("📊 Asset Allocation | Offshore Dashboard")
 
 # =========================
-# FUNÇÕES AUXILIARES
+# CARREGAMENTO DE DADOS
 # =========================
-
 @st.cache_data
-def load_data(file):
-    if file.name.endswith(".csv"):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
-
-    # Detecta coluna de data automaticamente
-    date_col = None
-    for c in df.columns:
-        if "date" in c.lower() or "data" in c.lower():
-            date_col = c
-            break
-
-    if date_col is None:
-        st.error("❌ Nenhuma coluna de data encontrada.")
-        st.stop()
-
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col)
-    df = df.set_index(date_col)
-
+def load_offshore_data(file):
+    # Lemos as duas primeiras linhas para capturar Classes e Tickers
+    header_df = pd.read_csv(file, nrows=2, header=None)
+    classes = header_df.iloc[0].tolist()
+    
+    # Carregamos o corpo dos dados (pulando a linha de tickers para o Pandas não se confundir)
+    df = pd.read_csv(file, skiprows=[1])
+    df.columns = classes # Nomeamos as colunas com as Classes
+    
+    # Tratamento de Data
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').set_index('Date')
+    
+    # Garantir que tudo é numérico e remover NAs iniciais (filtro de data comum)
+    df = df.apply(pd.to_numeric, errors='coerce')
+    df = df.dropna()
+    
     return df
 
+uploaded_file = st.file_uploader("Suba seu arquivo CSV Offshore", type=["csv"])
 
-def calc_returns(price_df):
-    return price_df.pct_change().dropna()
+if uploaded_file:
+    df = load_offshore_data(uploaded_file)
+    
+    # =========================
+    # CÁLCULO DOS 4 BENCHMARKS
+    # =========================
+    # Calculamos os retornos mensais primeiro
+    returns = df.pct_change().dropna()
+    
+    # Criando os Benchmarks Sintéticos (Base 100)
+    # B1: 100% BBG Global Agg
+    df['B1: 100% Global Agg'] = df['Bloomberg Global Aggregate']
+    
+    # B2: 10% MSCI (Equity) + 90% Global Agg
+    b2_ret = (0.10 * returns['Equity ']) + (0.90 * returns['Bloomberg Global Aggregate'])
+    df['B2: 10/90 Hybrid'] = 100 * (1 + b2_ret).cumprod()
+    
+    # B3: 20% MSCI (Equity) + 80% Global Agg
+    b3_ret = (0.20 * returns['Equity ']) + (0.80 * returns['Bloomberg Global Aggregate'])
+    df['B3: 20/80 Hybrid'] = 100 * (1 + b3_ret).cumprod()
+    
+    # B4: CPI (Já está na base, vamos apenas renomear para clareza)
+    df['B4: CPI Inflation'] = df['CPI']
 
+    # Recalculamos retornos com os novos benchmarks incluídos
+    all_returns = df.pct_change().dropna()
 
-def annualize_return(r, freq=252):
-    return (1 + r.mean()) ** freq - 1
+    # =========================
+    # DASHBOARD - VISUALIZAÇÃO
+    # =========================
+    
+    # Seletor de Ativos para o Gráfico
+    st.subheader("📈 Performance Relativa (Base 100)")
+    selected_assets = st.multiselect(
+        "Selecione Ativos e Benchmarks para Comparar:",
+        options=df.columns.tolist(),
+        default=['Equity ', 'B1: 100% Global Agg', 'B2: 10/90 Hybrid', 'B4: CPI Inflation']
+    )
 
+    if selected_assets:
+        fig = go.Figure()
+        for asset in selected_assets:
+            # Normalizando para base 100 no início do período selecionado
+            series = (df[asset] / df[asset].iloc[0]) * 100
+            fig.add_trace(go.Scatter(x=df.index, y=series, name=asset))
+        
+        fig.update_layout(template="simple_white", hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
 
-def annualize_vol(r, freq=252):
-    return r.std() * np.sqrt(freq)
+    # =========================
+    # TABELA DE MÉTRICAS
+    # =========================
+    st.subheader("📊 Métricas de Risco e Retorno (Anualizado)")
+    
+    # Assumindo 12 meses para anualização (dados mensais)
+    ann_ret = (1 + all_returns.mean())**12 - 1
+    ann_vol = all_returns.std() * np.sqrt(12)
+    
+    # Sharpe Ratio usando a coluna 'Cash' como Risk-Free
+    rf = all_returns['Cash'].mean() * 12
+    sharpe = (ann_ret - rf) / ann_vol
+    
+    metrics_df = pd.DataFrame({
+        "Retorno Anual": ann_ret,
+        "Volatilidade": ann_vol,
+        "Sharpe Ratio": sharpe
+    }).loc[selected_assets]
 
+    st.dataframe(metrics_df.style.format("{:.2%}", subset=["Retorno Anual", "Volatilidade"]).format("{:.2f}", subset=["Sharpe Ratio"]))
 
-def sharpe_ratio(r, rf):
-    excess = r.sub(rf, axis=0)
-    return annualize_return(excess) / annualize_vol(excess)
+    # =========================
+    # MATRIZ DE CORRELAÇÃO
+    # =========================
+    st.subheader("🎯 Matriz de Correlação")
+    corr = all_returns[selected_assets].corr()
+    fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
+    st.plotly_chart(fig_corr, use_container_width=True)
 
-
-# =========================
-# SIDEBAR
-# =========================
-
-st.sidebar.header("⚙️ Configurações")
-
-uploaded_file = st.sidebar.file_uploader(
-    "Upload da Base Master",
-    type=["xlsx", "csv"]
-)
-
-if uploaded_file is None:
-    st.info("⬅️ Faça upload da base para começar")
-    st.stop()
-
-df = load_data(uploaded_file)
-
-# =========================
-# MAPEAMENTO DE CLASSES
-# =========================
-
-class_map = {
-    "Cash": ["US:USG_EFFR"],
-    "High Yield": ["US:HYG"],
-    "Investment Grade": ["IE:AGGU"],
-    "Treasury 10y": ["IE:IE00BYSZ5V04"],
-    "Equity": ["US:MSCI_WORLD"],
-    "Alternatives": []  # placeholder
-}
-
-# Filtra colunas existentes
-assets = {
-    k: [c for c in v if c in df.columns]
-    for k, v in class_map.items()
-}
-
-price_df = df[[c for cols in assets.values() for c in cols]]
-
-returns = calc_returns(price_df)
-
-# Risk-free = Treasury 10Y
-rf_series = returns[assets["Treasury 10y"][0]] if assets["Treasury 10y"] else returns.mean(axis=1) * 0
-
-# =========================
-# PERFIS OFFSHORE
-# =========================
-
-profiles = {
-    "Ultra Conservador": {
-        "Cash": 0.30,
-        "Investment Grade": 0.40,
-        "Treasury 10y": 0.30
-    },
-    "Conservador": {
-        "Cash": 0.20,
-        "Investment Grade": 0.40,
-        "Equity": 0.40
-    },
-    "Moderado": {
-        "Investment Grade": 0.30,
-        "Equity": 0.70
-    },
-    "Moderado Arrojado": {
-        "Equity": 0.85,
-        "High Yield": 0.15
-    },
-    "Arrojado": {
-        "Equity": 1.00
-    }
-}
-
-# =========================
-# CARTEIRAS
-# =========================
-
-portfolio_returns = {}
-
-for p, weights in profiles.items():
-    r = 0
-    for cls, w in weights.items():
-        if assets[cls]:
-            r += returns[assets[cls]].mean(axis=1) * w
-    portfolio_returns[p] = r
-
-portfolio_df = pd.DataFrame(portfolio_returns)
-
-# =========================
-# RESULTADOS CONSOLIDADOS
-# =========================
-
-st.subheader("📌 Resultados Consolidados")
-
-stats = pd.DataFrame(index=["Retorno Anualizado", "Volatilidade", "Sharpe"])
-
-stats.loc["Retorno Anualizado"] = annualize_return(portfolio_df)
-stats.loc["Volatilidade"] = annualize_vol(portfolio_df)
-stats.loc["Sharpe"] = sharpe_ratio(portfolio_df, rf_series)
-
-st.dataframe(stats.style.format("{:.2%}"))
-
-# =========================
-# ALOCAÇÃO POR CLASSE
-# =========================
-
-st.subheader("🏢 Alocação por Classe de Ativo")
-
-alloc_df = pd.DataFrame(profiles).fillna(0)
-
-fig_alloc = px.bar(
-    alloc_df.T,
-    barmode="stack"
-)
-st.plotly_chart(fig_alloc, use_container_width=True)
-
-# =========================
-# PERFORMANCE DAS CARTEIRAS
-# =========================
-
-st.subheader("📈 Performance das Carteiras")
-
-cum_perf = (1 + portfolio_df).cumprod() - 1
-
-fig_perf = go.Figure()
-for c in cum_perf.columns:
-    fig_perf.add_trace(go.Scatter(
-        x=cum_perf.index,
-        y=cum_perf[c],
-        name=c
-    ))
-
-st.plotly_chart(fig_perf, use_container_width=True)
-
-# =========================
-# ESTATÍSTICAS DOS ATIVOS
-# =========================
-
-st.subheader("📊 Estatísticas das Séries Individuais")
-
-asset_stats = pd.DataFrame({
-    "Retorno": annualize_return(returns),
-    "Vol": annualize_vol(returns),
-    "Sharpe": sharpe_ratio(returns, rf_series)
-})
-
-st.dataframe(asset_stats.style.format("{:.2%}"))
-
-# =========================
-# MATRIZ DE CORRELAÇÃO
-# =========================
-
-st.subheader("🎯 Matriz de Correlação")
-
-corr = returns.corr()
-
-fig_corr = px.imshow(
-    corr,
-    color_continuous_scale="RdYlGn",
-    zmin=-1,
-    zmax=1
-)
-
-st.plotly_chart(fig_corr, use_container_width=True)
-
-# =========================
-# EFICIÊNCIA HISTÓRICA
-# =========================
-
-st.subheader("🔎 Análise de Eficiência (Histórico)")
-
-eff_df = pd.DataFrame({
-    "Retorno": annualize_return(portfolio_df),
-    "Risco": annualize_vol(portfolio_df)
-})
-
-fig_eff = px.scatter(
-    eff_df,
-    x="Risco",
-    y="Retorno",
-    text=eff_df.index
-)
-
-st.plotly_chart(fig_eff, use_container_width=True)
-
-# =========================
-# EFICIÊNCIA FORWARD-LOOKING
-# =========================
-
-st.subheader("🚀 Análise de Eficiência (Forward-looking)")
-
-st.info("📌 Estrutura pronta. Retornos esperados podem ser adicionados manualmente futuramente.")
-
+else:
+    st.info("Aguardando o upload do arquivo CSV para processar a análise offshore.")
