@@ -2,135 +2,107 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 
 # Configuração da Página
-st.set_page_config(page_title="Gestão de Carteira Offshore", layout="wide")
+st.set_page_config(page_title="Portfolio Offshore", layout="wide")
 
 # =========================
-# FUNÇÃO DE CARREGAMENTO DE DADOS
+# FUNÇÃO DE CARREGAMENTO (AJUSTADA)
 # =========================
 @st.cache_data
 def load_data(file):
     try:
-        # Lê o ficheiro (ajustado para a estrutura que enviaste)
+        # Lendo o CSV e tratando colunas extras/vazias
         df = pd.read_csv(file)
         
-        # Limpa colunas vazias (como aquela entre Alternatives e CPI)
+        # Remove colunas que começam com 'Unnamed' ou que são totalmente vazias
         df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+        df = df.dropna(axis=1, how='all')
         
-        # Converte Data
-        df['Date'] = pd.to_datetime(df['Date'])
+        # Ajuste de Data: Converte e remove linhas onde a data é inválida
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.dropna(subset=['Date'])
         df = df.sort_values('Date').set_index('Date')
         
-        # Garante que todos os valores são numéricos
-        df = df.apply(pd.to_numeric, errors='coerce').dropna()
+        # Garante que os valores financeiros sejam números (float)
+        df = df.apply(pd.to_numeric, errors='coerce')
         return df
     except Exception as e:
-        st.error(f"Erro ao carregar o ficheiro: {e}")
+        st.error(f"Erro na leitura do arquivo: {e}")
         return None
 
 # =========================
-# BARRA LATERAL - INPUT DE PESOS
+# SIDEBAR
 # =========================
 with st.sidebar:
-    st.header("📂 Configuração")
-    uploaded_file = st.file_uploader("Carrega a tua base (CSV ou Excel)", type=["csv", "xlsx"])
+    st.header("📂 Upload de Dados")
+    uploaded_file = st.file_uploader("Suba o arquivo 'comdinheiro.csv'", type=["csv", "xlsx"])
     
     if uploaded_file:
-        data = load_data(uploaded_file)
+        df_raw = load_data(uploaded_file)
         
-        if data is not None:
-            # Classes exatas do teu ficheiro
+        if df_raw is not None:
+            # Classes EXATAS do seu arquivo (incluindo espaços)
             assets = ['Cash', 'High Yield', 'Investment Grade\n', 'Treasury 10y', 'Equity ', 'Alternatives']
             
-            st.subheader("⚖️ Alocação por Classe")
-            weights = {}
+            st.subheader("⚖️ Alocação")
+            user_weights = {}
             total_w = 0
-            
-            for asset in assets:
-                clean_name = asset.replace('\n', '').strip()
-                val = st.number_input(f"% {clean_name}", min_value=0, max_value=100, value=0, step=5)
-                weights[asset] = val / 100
+            for a in assets:
+                # Nome amigável para o usuário ver
+                display_name = a.replace('\n', '').strip()
+                val = st.number_input(f"% {display_name}", 0, 100, 0, step=5)
+                user_weights[a] = val / 100
                 total_w += val
             
-            st.divider()
-            if total_w == 100:
-                st.success(f"Total: {total_w}% ✅")
-                valid_setup = True
-            else:
-                st.error(f"Total: {total_w}% (Deve ser 100%)")
-                valid_setup = False
+            is_valid = total_w == 100
+            if is_valid: st.success(f"Total: {total_w}% ✅")
+            else: st.error(f"Soma: {total_w}% (Deve ser 100%)")
 
 # =========================
-# PROCESSAMENTO E DASHBOARD
+# DASHBOARD
 # =========================
-if uploaded_file and valid_setup:
-    # 1. Cálculo de Retornos Mensais
-    rets = data.pct_change().dropna()
+if uploaded_file and is_valid:
+    # Retornos Mensais
+    rets = df_raw.pct_change().dropna()
     
-    # 2. Performance da "Sua Carteira"
-    user_portfolio_rets = sum(rets[asset] * weights[asset] for asset in assets)
+    # Cálculos de Performance
+    user_ret = sum(rets[a] * user_weights[a] for a in assets)
+    # Benchmarks (B2 e B3 baseados nas suas colunas)
+    b2_ret = (0.10 * rets['Equity ']) + (0.90 * rets['Bloomberg Global Aggregate'])
     
-    # 3. Benchmarks Híbridos (Ex: B2 = 10% Equity / 90% Global Agg)
-    b2_rets = (0.10 * rets['Equity ']) + (0.90 * rets['Bloomberg Global Aggregate'])
-    b3_rets = (0.20 * rets['Equity ']) + (0.80 * rets['Bloomberg Global Aggregate'])
+    # Criando Base 100 para Performance
+    perf_df = pd.DataFrame(index=rets.index)
+    perf_df['Sua Carteira'] = (1 + user_ret).cumprod() * 100
+    perf_df['Benchmark B2'] = (1 + b2_ret).cumprod() * 100
+    perf_df['CPI'] = (df_raw['CPI'] / df_raw['CPI'].iloc[0]) * 100
     
-    # 4. DataFrames de Performance (Base 100)
-    perf_df = pd.DataFrame(index=data.index)
-    perf_df['Sua Carteira'] = (1 + user_portfolio_rets).cumprod() * 100
-    perf_df['B2: 10/90 Hybrid'] = (1 + b2_rets).cumprod() * 100
-    perf_df['B3: 20/80 Hybrid'] = (1 + b3_rets).cumprod() * 100
-    perf_df['CPI (Inflação)'] = (data['CPI'] / data['CPI'].iloc[0]) * 100
-    perf_df.iloc[0] = 100 # Garantir início em 100
-
-    # --- LAYOUT DE ABAS ---
-    tab1, tab2, tab3 = st.tabs(["📈 Comparativo Geral", "🧱 Composição (Stacked)", "🎯 Matriz de Correlação"])
-
+    # ABAS
+    tab1, tab2, tab3 = st.tabs(["Performance", "Composição", "Correlação"])
+    
     with tab1:
-        st.subheader("Performance Acumulada")
-        fig_line = px.line(perf_df, template="plotly_white")
-        fig_line.update_traces(patch={"line": {"width": 4}}, selector={"name": "Sua Carteira"})
-        st.plotly_chart(fig_line, use_container_width=True)
-        
-        # Métricas de Risco/Retorno
-        st.divider()
-        c1, c2, c3 = st.columns(3)
-        
-        # Cálculo Sharpe (usando Cash como Risk-Free)
-        rf_anual = (1 + rets['Cash'].mean())**12 - 1
-        ret_anual = (1 + user_portfolio_rets.mean())**12 - 1
-        vol_anual = user_portfolio_rets.std() * np.sqrt(12)
-        sharpe = (ret_anual - rf_anual) / vol_anual
-        
-        c1.metric("Retorno Anualizado", f"{ret_anual:.2%}")
-        c2.metric("Volatilidade Anual", f"{vol_anual:.2%}")
-        c3.metric("Sharpe Ratio", f"{sharpe:.2f}")
-
+        st.subheader("📈 Rentabilidade Acumulada")
+        st.line_chart(perf_df)
+    
     with tab2:
-        st.subheader("Anatomia da Carteira (Evolução dos Ativos)")
-        # Cálculo da composição empilhada
-        stacked_df = pd.DataFrame(index=data.index)
-        for asset, w in weights.items():
+        st.subheader("🧱 Evolução da Composição (Stacked)")
+        # Gráfico empilhado usando a Base 100 de cada ativo
+        comp_df = pd.DataFrame(index=df_raw.index)
+        for a, w in user_weights.items():
             if w > 0:
-                stacked_df[asset.strip()] = w * (data[asset] / data[asset].iloc[0]) * 100
+                comp_df[a.strip()] = w * (df_raw[a] / df_raw[a].iloc[0]) * 100
         
-        fig_area = px.area(stacked_df, color_discrete_sequence=px.colors.qualitative.T10)
-        fig_area.update_layout(yaxis_title="Contribuição (Base 100)", hovermode="x unified")
+        fig_area = px.area(comp_df, template="plotly_white")
         st.plotly_chart(fig_area, use_container_width=True)
         
 
     with tab3:
-        st.subheader("Matriz de Correlação")
-        # Criar matriz com ativos + carteira final
+        st.subheader("🎯 Matriz de Correlação")
         corr_df = rets[assets].copy()
         corr_df.columns = [c.strip() for c in corr_df.columns]
-        corr_df['SUA CARTEIRA'] = user_portfolio_rets
-        
-        corr_matrix = corr_df.corr()
-        fig_corr = px.imshow(corr_matrix, text_auto=".2f", color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
+        fig_corr = px.imshow(corr_data := corr_df.corr(), text_auto=".2f", color_continuous_scale='RdBu_r')
         st.plotly_chart(fig_corr, use_container_width=True)
         
 
 else:
-    st.info("💡 Por favor, carrega o ficheiro e ajusta os pesos na barra lateral para 100%.")
+    st.info("Suba o arquivo e ajuste os pesos para 100% na barra lateral.")
