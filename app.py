@@ -46,15 +46,22 @@ if arquivo:
         # ================= CPI (benchmark) =================
         cpi_level = df_raw["CPI"].dropna()
 
+        if len(cpi_level) < 2:
+            st.error("CPI sem observações suficientes.")
+            st.stop()
+
         cpi_anual = (cpi_level.iloc[-1] / cpi_level.iloc[0])**(252/len(cpi_level)) - 1
         cpi_ret_diario = (1 + cpi_anual)**(1/252) - 1
-
         cpi_ret = pd.Series(cpi_ret_diario, index=df_raw.index)
 
-        # ================= ATIVOS (TODOS, exceto CPI) =================
+        # ================= ATIVOS =================
         df_assets = df_raw.drop(columns=["CPI"]).dropna(how="any")
         ret_assets = df_assets.pct_change().dropna()
         num_dias = len(ret_assets)
+
+        if num_dias == 0:
+            st.error("Base de ativos sem dados suficientes.")
+            st.stop()
 
         cpi_ret = cpi_ret.loc[ret_assets.index]
 
@@ -73,6 +80,9 @@ if arquivo:
         bench_anual = {}
 
         for b, r in benchmarks.items():
+            if r.empty:
+                st.error(f"Benchmark {b} sem dados.")
+                st.stop()
             curva = (1 + r).cumprod() - 1
             curvas_bench[b] = curva
             bench_anual[b] = (1 + curva.iloc[-1])**(252/num_dias) - 1
@@ -95,9 +105,17 @@ if arquivo:
 
         for p in perfis:
             w = pesos[p].values / 100
-            r_p = ret_assets.dot(w)
+            soma = w.sum()
 
+            if soma == 0:
+                continue  # <-- evita o erro definitivamente
+
+            if abs(soma - 1) > 1e-4:
+                st.warning(f"{p}: soma dos pesos ≠ 100% ({soma*100:.1f}%)")
+
+            r_p = ret_assets.dot(w)
             perf_acum[p] = (1 + r_p).cumprod() - 1
+
             r_anual = (1 + perf_acum[p].iloc[-1])**(252/num_dias) - 1
             vol = np.sqrt(w.T @ cov @ w)
 
@@ -110,6 +128,10 @@ if arquivo:
                 m[f"Sharpe vs {b}"] = (r_anual - bench_anual[b]) / vol if vol > 0 else 0
 
             metrics[p] = m
+
+        if not metrics:
+            st.warning("Preencha ao menos um perfil com pesos > 0.")
+            st.stop()
 
         # ================= RESULTADOS =================
         st.markdown("---")
@@ -138,12 +160,12 @@ if arquivo:
                 line=dict(color=CORES_BENCH[b], dash="dot", width=1.5)
             ))
 
-        for i, p in enumerate(perfis):
+        for i, p in enumerate(metrics.keys()):
             fig.add_trace(go.Scatter(
                 x=perf_acum.index,
                 y=perf_acum[p],
                 name=p,
-                line=dict(color=CORES_LIFETIME[i], width=3 if p == "Aggressive" else 2)
+                line=dict(color=CORES_LIFETIME[i], width=3)
             ))
 
         fig.update_layout(
