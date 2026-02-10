@@ -5,117 +5,122 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 # =========================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO E ESTILO
 # =========================
 st.set_page_config(page_title="Asset Allocation Offshore", layout="wide")
-st.title("📊 Asset Allocation | Offshore")
 
 @st.cache_data
 def load_data(file):
-    # Verifica a extensão e carrega
-    if file.name.endswith('.csv'):
-        # Lemos primeiro os nomes das classes (linha 0)
-        df_classes = pd.read_csv(file, nrows=0).columns.tolist()
-        # Carregamos os dados pulando a linha do ticker (linha 1)
-        df = pd.read_csv(file, skiprows=[1])
-    else:
-        df_classes = pd.read_excel(file, nrows=0).columns.tolist()
-        df = pd.read_excel(file, skiprows=[1])
-
-    # Renomear colunas e limpar colunas sem nome (vazias no Excel)
-    df.columns = df_classes
+    # Tratamento para o seu CSV com duplo cabeçalho
+    header = pd.read_csv(file, nrows=0).columns.tolist()
+    df = pd.read_csv(file, skiprows=[1])
+    df.columns = header
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-    
-    # Tratamento de Data
-    date_col = df.columns[0] # Assume que a primeira coluna é a data
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col).set_index(date_col)
-    
-    # Converte tudo para numérico e remove linhas onde não há dados para TODOS os ativos
-    df = df.apply(pd.to_numeric, errors='coerce')
-    df = df.dropna() 
-    
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.set_index('Date').apply(pd.to_numeric, errors='coerce').dropna()
     return df
 
 # =========================
-# UPLOAD DO ARQUIVO
+# SIDEBAR - FILTROS E PESOS
 # =========================
-uploaded_file = st.file_uploader("Suba sua base Offshore (CSV ou Excel)", type=["csv", "xlsx"])
-
-if uploaded_file:
-    try:
-        df = load_data(uploaded_file)
+with st.sidebar:
+    st.header("⚙️ Painel de Alocação")
+    uploaded_file = st.file_uploader("Suba o database Offshore (CSV)", type=["csv"])
+    
+    if uploaded_file:
+        raw_df = load_data(uploaded_file)
+        # Classes exatas da sua planilha
+        assets = ['Cash', 'High Yield', 'Investment Grade\n', 'Treasury 10y', 'Equity ', 'Alternatives']
         
-        # --- CÁLCULO DOS BENCHMARKS HÍBRIDOS ---
-        # Usamos retornos mensais para construir as séries
-        rets = df.pct_change().dropna()
+        st.subheader("Simular Sua Carteira")
+        user_weights = {}
+        total_w = 0
+        for a in assets:
+            val = st.number_input(f"% {a.strip()}", 0, 100, 0, step=5)
+            user_weights[a] = val / 100
+            total_w += val
         
-        # B1: 100% Global Agg
-        df['B1: 100% Global Agg'] = df['Bloomberg Global Aggregate']
+        valid = total_w == 100
+        if valid: 
+            st.success(f"✅ Soma: {total_w}%")
+        else: 
+            st.error(f"❌ Soma: {total_w}% (Ajuste para 100%)")
+
+# =========================
+# PROCESSAMENTO DOS DADOS
+# =========================
+if uploaded_file and valid:
+    rets = raw_df.pct_change().dropna()
+    
+    # 1. Séries de Retorno dos Perfis
+    user_ret = sum(rets[a] * user_weights[a] for a in assets)
+    b2_ret = (0.10 * rets['Equity ']) + (0.90 * rets['Bloomberg Global Aggregate'])
+    b3_ret = (0.20 * rets['Equity ']) + (0.80 * rets['Bloomberg Global Aggregate'])
+
+    # 2. Lógica para as Colunas Empilhadas (Base 100)
+    def calc_stacked(w_dict, prices):
+        stack_df = pd.DataFrame(index=prices.index)
+        for asset, w in w_dict.items():
+            if w > 0:
+                stack_df[asset.strip()] = w * (prices[asset] / prices[asset].iloc[0]) * 100
+        return stack_df
+
+    comp_user = calc_stacked(user_weights, raw_df)
+    comp_b2 = calc_stacked({'Equity ': 0.10, 'Bloomberg Global Aggregate': 0.90}, raw_df)
+    comp_b3 = calc_stacked({'Equity ': 0.20, 'Bloomberg Global Aggregate': 0.80}, raw_df)
+
+    # =========================
+    # DASHBOARD PRINCIPAL
+    # =========================
+    st.title("📊 Asset Allocation Offshore | Dash Final")
+    
+    tab1, tab2, tab3 = st.tabs(["📈 Performance", "🧱 Composição (Stacked)", "🎯 Correlação"])
+
+    with tab1:
+        st.subheader("Performance Acumulada vs Benchmarks")
+        perf_all = pd.DataFrame(index=raw_df.index)
+        perf_all['Sua Carteira'] = (1 + user_ret).cumprod() * 100
+        perf_all['B2: 10/90 Hybrid'] = (1 + b2_ret).cumprod() * 100
+        perf_all['B3: 20/80 Hybrid'] = (1 + b3_ret).cumprod() * 100
+        perf_all['CPI (Inflação)'] = (raw_df['CPI'] / raw_df['CPI'].iloc[0]) * 100
+        perf_all.iloc[0] = 100
         
-        # B2: 10% Equity + 90% Global Agg
-        b2_rets = (0.10 * rets['Equity ']) + (0.90 * rets['Bloomberg Global Aggregate'])
-        df['B2: 10/90 Hybrid'] = 100 * (1 + b2_rets).cumprod()
+        fig_line = px.line(perf_all, template="plotly_white")
+        fig_line.update_traces(patch={"line": {"width": 4}}, selector={"name": "Sua Carteira"})
+        st.plotly_chart(fig_line, use_container_width=True)
+
+        # KPIs Rápidos
+        c1, c2, c3 = st.columns(3)
+        rf = (1 + rets['Cash'].mean())**12 - 1
+        vol = user_ret.std() * np.sqrt(12)
+        ret_aa = (1 + user_ret.mean())**12 - 1
         
-        # B3: 20% Equity + 80% Global Agg
-        b3_rets = (0.20 * rets['Equity ']) + (0.80 * rets['Bloomberg Global Aggregate'])
-        df['B3: 20/80 Hybrid'] = 100 * (1 + b3_rets).cumprod()
+        c1.metric("Retorno Anualizado", f"{ret_aa:.2%}")
+        c2.metric("Volatilidade Anualizada", f"{vol:.2%}")
+        c3.metric("Sharpe Ratio", f"{(ret_aa - rf)/vol:.2f}")
+
+    with tab2:
+        st.subheader("Quebra por Perfil (Visual Empilhado)")
+        p_choice = st.selectbox("Selecione o perfil para ver a composição:", 
+                                ["Sua Carteira", "Benchmark B2 (10/90)", "Benchmark B3 (20/80)"])
         
-        # B4: CPI (Já está na base 100 no seu arquivo)
-        df['B4: CPI Inflation'] = df['CPI']
+        map_plots = {"Sua Carteira": comp_user, "Benchmark B2 (10/90)": comp_b2, "Benchmark B3 (20/80)": comp_b3}
+        
+        fig_stack = px.area(map_plots[p_choice], title=f"Contribuição Histórica: {p_choice}")
+        fig_stack.update_layout(yaxis_title="Peso Acumulado (Base 100)", hovermode="x unified")
+        st.plotly_chart(fig_stack, use_container_width=True)
+        
 
-        # Lista final de colunas para o usuário escolher
-        all_options = df.columns.tolist()
-
-        # --- INTERFACE ---
-        st.subheader("📈 Comparação de Performance")
-        selected = st.multiselect(
-            "Selecione o que visualizar:", 
-            all_options, 
-            default=['Equity ', 'B1: 100% Global Agg', 'B2: 10/90 Hybrid']
-        )
-
-        if selected:
-            # Re-normalização para o início do gráfico (garante que todos partam de 100)
-            fig_df = (df[selected] / df[selected].iloc[0]) * 100
-            
-            fig = go.Figure()
-            for col in selected:
-                fig.add_trace(go.Scatter(x=fig_df.index, y=fig_df[col], name=col))
-            
-            fig.update_layout(template="plotly_white", hovermode="x unified", yaxis_title="Base 100")
-            st.plotly_chart(fig, use_container_width=True)
-
-            # --- MÉTRICAS ---
-            st.subheader("📊 Estatísticas Anualizadas")
-            
-            # Retornos mensais atualizados com os benchmarks
-            final_rets = df[selected].pct_change().dropna()
-            
-            # Métricas (Assumindo dados mensais = 12 janelas)
-            ann_ret = (1 + final_rets.mean())**12 - 1
-            ann_vol = final_rets.std() * np.sqrt(12)
-            
-            # Sharpe Ratio (Usando 'Cash' como Risk-Free)
-            # Se 'Cash' não estiver selecionado, buscamos do DF original
-            rf_rate = (1 + df['Cash'].pct_change().mean())**12 - 1
-            sharpe = (ann_ret - rf_rate) / ann_vol
-            
-            metrics_table = pd.DataFrame({
-                "Retorno (a.a.)": ann_ret,
-                "Volatilidade (a.a.)": ann_vol,
-                "Sharpe Ratio": sharpe
-            })
-            
-            st.table(metrics_table.style.format({
-                "Retorno (a.a.)": "{:.2%}",
-                "Volatilidade (a.a.)": "{:.2%}",
-                "Sharpe Ratio": "{:.2f}"
-            }))
-
-    except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
-        st.warning("Verifique se os nomes das colunas 'Equity ', 'Bloomberg Global Aggregate', 'CPI' e 'Cash' estão escritos exatamente assim (incluindo espaços).")
+    with tab3:
+        st.subheader("Matriz de Correlação dos Ativos")
+        corr_df = rets[assets].copy()
+        corr_df.columns = [c.strip() for c in corr_df.columns]
+        corr_df['Sua Carteira'] = user_ret
+        
+        matrix = corr_df.corr()
+        fig_corr = px.imshow(matrix, text_auto=".2f", color_continuous_scale='RdBu_r', zmin=-1, zmax=1)
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
 
 else:
-    st.info("💡 Por favor, suba o arquivo 'database.xlsx' ou o CSV correspondente.")
+    st.info("💡 Suba o arquivo e ajuste os pesos na sidebar para 100% para carregar o dashboard.")
