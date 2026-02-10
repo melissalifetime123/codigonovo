@@ -3,17 +3,16 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# 1. CONFIGURAÇÃO DE PÁGINA (Padrão Sênior)
+# 1. CONFIGURAÇÃO DE PÁGINA (Estilo Lifetime/Senior)
 st.set_page_config(page_title="Offshore Portfolio Analytics", layout="wide")
 
 st.markdown("""
     <style>
     [data-testid="stDataFrame"] { width: 100%; }
     h1, h2, h3 { color: #1C2C54; font-family: 'Segoe UI', sans-serif; }
-    .metric-container { 
-        background-color: #F8F9FA; padding: 15px; border-radius: 10px; 
-        border-left: 5px solid #1C2C54; margin-top: 20px;
-    }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0 0; gap: 1px; padding: 10px; }
+    .stTabs [aria-selected="true"] { background-color: #1C2C54 !important; color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -22,7 +21,7 @@ st.markdown("""
 def load_offshore_data(file):
     try:
         df = pd.read_excel(file)
-        # Limpeza agressiva de nomes de colunas
+        # Limpeza de nomes de colunas
         df.columns = [str(c).replace('\n', ' ').replace('"', '').strip() for c in df.columns]
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date']).sort_values('Date').set_index('Date')
@@ -31,100 +30,88 @@ def load_offshore_data(file):
         st.error(f"Erro ao ler Excel: {e}")
         return None
 
-# --- SIDEBAR: CONFIGURAÇÕES ---
+# --- SIDEBAR: APENAS UPLOAD ---
 with st.sidebar:
-    st.title("📂 Offshore Setup")
+    st.title("📂 Dados")
     uploaded_file = st.file_uploader("Upload 'database.xlsx'", type=["xlsx", "xls"])
-    
-    st.subheader("⚖️ Matriz de Perfis")
-    # Tabela de pesos pré-preenchida para não travar o início
-    df_perfis = pd.DataFrame({
-        "Classe": ['Cash', 'High Yield', 'Investment Grade', 'Treasury 10y', 'Equity', 'Alternatives'],
-        "Conservador": [70, 0, 20, 10, 0, 0],
-        "Moderado": [20, 10, 30, 10, 20, 10],
-        "Arrojado": [5, 15, 15, 5, 45, 15]
-    })
-    edited_df = st.data_editor(df_perfis, hide_index=True)
-    perfil_selecionado = st.selectbox("Perfil em Destaque", ["Conservador", "Moderado", "Arrojado"])
+    st.info("O dashboard será atualizado automaticamente ao subir o arquivo.")
 
-# --- PROCESSAMENTO PRINCIPAL ---
+# --- ÁREA PRINCIPAL ---
 if uploaded_file:
     df_raw = load_offshore_data(uploaded_file)
     
     if df_raw is not None:
-        # A. CÁLCULO DOS RETORNOS (Independente de pesos)
-        rets = df_raw.pct_change().dropna()
+        st.title("📊 Offshore Performance Analytics")
         
-        # Benchmarks Solicitados
+        # COLUNAS PARA PESOS E MÉTRICAS
+        col_pesos, col_espaco, col_resumo = st.columns([1.5, 0.1, 1])
+        
+        with col_pesos:
+            st.subheader("⚖️ Matriz de Alocação por Perfil")
+            df_perfis = pd.DataFrame({
+                "Classe": ['Cash', 'High Yield', 'Investment Grade', 'Treasury 10y', 'Equity', 'Alternatives'],
+                "Conservador": [70, 0, 20, 10, 0, 0],
+                "Moderado": [20, 10, 30, 10, 20, 10],
+                "Arrojado": [5, 15, 15, 5, 45, 15]
+            })
+            # Tabela editável no centro da página
+            edited_df = st.data_editor(df_perfis, hide_index=True, use_container_width=True)
+            perfil_selecionado = st.radio("Selecione o perfil para destacar no gráfico:", ["Conservador", "Moderado", "Arrojado"], horizontal=True)
+
+        # CÁLCULOS
+        rets = df_raw.pct_change().dropna()
+        weights = edited_df.set_index("Classe")[perfil_selecionado] / 100
+        
+        # Benchmarks
         b1_agg = rets['Bloomberg Global Aggregate']
         b2_10_90 = (0.10 * rets['Equity']) + (0.90 * rets['Bloomberg Global Aggregate'])
         b3_20_80 = (0.20 * rets['Equity']) + (0.80 * rets['Bloomberg Global Aggregate'])
         b4_cpi = rets['CPI']
-
-        # B. CÁLCULO DA CARTEIRA DO PERFIL (Opcional)
-        weights = edited_df.set_index("Classe")[perfil_selecionado] / 100
         user_ret = sum(rets[asset] * weights[asset] for asset in weights.index if asset in rets.columns)
+
+        with col_resumo:
+            st.subheader("🎯 KPIs do Perfil")
+            ret_total = ((1 + user_ret).prod() - 1)
+            vol_anual = user_ret.std() * np.sqrt(12)
+            
+            st.markdown(f"""
+            <div style="background-color:#F8F9FA; padding:20px; border-radius:10px; border-left: 5px solid #1C2C54;">
+                <p style="margin-bottom:5px;">Retorno Acumulado</p>
+                <h2 style="margin:0;">{ret_total:.2%}</h2>
+                <p style="margin-top:15px; margin-bottom:5px;">Volatilidade (aa)</p>
+                <h2 style="margin:0;">{vol_anual:.2%}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # GRÁFICOS EM ABAS
+        st.divider()
+        tab_perf, tab_comp = st.tabs(["📈 Performance Comparativa", "🧱 Composição da Carteira"])
         
-        # DataFrame de Performance (Base 100)
         perf_df = pd.DataFrame(index=rets.index)
         perf_df['100% BBG Global Agg'] = (1 + b1_agg).cumprod() * 100
         perf_df['10/90 (Equity/Agg)'] = (1 + b2_10_90).cumprod() * 100
         perf_df['20/80 (Equity/Agg)'] = (1 + b3_20_80).cumprod() * 100
         perf_df['CPI (Inflação)'] = (1 + b4_cpi).cumprod() * 100
-        
-        # Só adiciona o perfil se a soma for 100%
-        if abs(weights.sum() - 1.0) < 0.01:
-            perf_df[f'Perfil: {perfil_selecionado}'] = (1 + user_ret).cumprod() * 100
+        perf_df[f'Perfil: {perfil_selecionado}'] = (1 + user_ret).cumprod() * 100
 
-        # --- DASHBOARD VISUAL ---
-        st.title("📊 Offshore Performance Dashboard")
-
-        # 1. Gráfico de Performance
-        fig = go.Figure()
-        # Cores Lifetime/Senior
-        colors = {'100% BBG Global Agg': '#94a3b8', '10/90 (Equity/Agg)': '#64748b', 
-                  '20/80 (Equity/Agg)': '#334155', 'CPI (Inflação)': '#ef4444'}
-        colors[f'Perfil: {perfil_selecionado}'] = '#1e293b'
-
-        for col in perf_df.columns:
-            is_perfil = 'Perfil' in col
-            fig.add_trace(go.Scatter(
-                x=perf_df.index, y=perf_df[col], name=col,
-                line=dict(width=4 if is_perfil else 2, 
-                          dash='dash' if 'CPI' in col else 'solid',
-                          color=colors.get(col))
-            ))
-        
-        fig.update_layout(template="simple_white", hovermode="x unified", title="Retorno Acumulado")
-        st.plotly_chart(fig, use_container_width=True)
-        
-
-        # 2. Tabela de Métricas Rápidas
-        st.subheader("🎯 Estatísticas do Período")
-        
-        metrics_list = []
-        for col in perf_df.columns:
-            # Retorno total
-            r_total = (perf_df[col].iloc[-1] / 100) - 1
-            # Volatilidade (aa)
-            if col in [f'Perfil: {perfil_selecionado}']:
-                vol = user_ret.std() * np.sqrt(12)
-            elif col == '100% BBG Global Agg':
-                vol = b1_agg.std() * np.sqrt(12)
-            else:
-                vol = 0 # Para benchmarks compostos, cálculo simplificado ou omitido
+        with tab_perf:
+            fig = go.Figure()
+            # Estilização de cores
+            cores = {'CPI (Inflação)': '#ef4444', f'Perfil: {perfil_selecionado}': '#1C2C54'}
             
-            metrics_list.append({
-                "Estratégia": col,
-                "Retorno Total": f"{r_total:.2%}",
-                "Volatilidade (aa)": f"{vol:.2%}" if vol > 0 else "---"
-            })
-        
-        st.table(pd.DataFrame(metrics_list))
+            for col in perf_df.columns:
+                is_destaque = col == f'Perfil: {perfil_selecionado}'
+                fig.add_trace(go.Scatter(
+                    x=perf_df.index, y=perf_df[col], name=col,
+                    line=dict(width=4 if is_destaque else 2, 
+                              dash='dash' if 'CPI' in col else 'solid',
+                              color=cores.get(col))
+                ))
+            fig.update_layout(template="simple_white", hovermode="x unified", height=500)
+            st.plotly_chart(fig, use_container_width=True)
+            
 
-        # 3. Composição (Gráfico de área apenas se o perfil estiver ativo)
-        if f'Perfil: {perfil_selecionado}' in perf_df.columns:
-            st.subheader(f"🧱 Alocação Interna: {perfil_selecionado}")
+        with tab_comp:
             comp_df = pd.DataFrame(index=df_raw.index)
             for asset, w in weights.items():
                 if w > 0:
@@ -133,8 +120,8 @@ if uploaded_file:
             fig_area = go.Figure()
             for col in comp_df.columns:
                 fig_area.add_trace(go.Scatter(x=comp_df.index, y=comp_df[col], name=col, stackgroup='one'))
-            fig_area.update_layout(template="simple_white", yaxis_title="Pontos")
+            fig_area.update_layout(template="simple_white", height=500, yaxis_title="Contribuição Base 100")
             st.plotly_chart(fig_area, use_container_width=True)
 
 else:
-    st.info("👋 **Aguardando arquivo.** Suba o seu Excel para visualizar os benchmarks offshore instantaneamente.")
+    st.info("👋 **Aguardando arquivo.** Por favor, carregue o 'database.xlsx' na barra lateral para iniciar a análise.")
