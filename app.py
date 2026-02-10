@@ -18,12 +18,6 @@ st.markdown("""
 <style>
 [data-testid="stDataFrame"] { width: 100%; }
 th { min-width: 110px !important; text-align: center !important; }
-.metric-container {
-    background-color: #F8F9FA;
-    padding: 15px;
-    border-radius: 10px;
-    border-left: 5px solid #1C2C54;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -43,29 +37,32 @@ if arquivo:
 
         df_raw = df_raw.apply(pd.to_numeric, errors="coerce")
 
-        # ================= CPI (benchmark) =================
+        # ================= CPI (benchmark – robusto) =================
         cpi_level = df_raw["CPI"].dropna()
 
         if len(cpi_level) < 2:
-            st.error("CPI sem observações suficientes.")
+            st.error("CPI sem dados suficientes.")
             st.stop()
 
-        cpi_anual = (cpi_level.iloc[-1] / cpi_level.iloc[0])**(252/len(cpi_level)) - 1
-        cpi_ret_diario = (1 + cpi_anual)**(1/252) - 1
+        cpi_anual = (cpi_level.iloc[-1] / cpi_level.iloc[0])**(252 / len(cpi_level)) - 1
+        cpi_ret_diario = (1 + cpi_anual)**(1 / 252) - 1
+
+        # série diária constante alinhada ao calendário inteiro
         cpi_ret = pd.Series(cpi_ret_diario, index=df_raw.index)
 
-        # ================= ATIVOS =================
-        df_assets = df_raw.drop(columns=["CPI"]).dropna(how="any")
-        ret_assets = df_assets.pct_change().dropna()
-        num_dias = len(ret_assets)
+        # ================= ATIVOS (SEM forçar interseção) =================
+        df_assets = df_raw.drop(columns=["CPI"])
+        ret_assets = df_assets.pct_change()
 
-        if num_dias == 0:
+        if ret_assets.dropna(how="all").empty:
             st.error("Base de ativos sem dados suficientes.")
             st.stop()
 
-        cpi_ret = cpi_ret.loc[ret_assets.index]
-
         # ================= BENCHMARKS =================
+        if "Bloomberg Global Aggregate" not in ret_assets.columns or "Equity" not in ret_assets.columns:
+            st.error("Base precisa conter 'Bloomberg Global Aggregate' e 'Equity'.")
+            st.stop()
+
         ret_agg = ret_assets["Bloomberg Global Aggregate"]
         ret_eq = ret_assets["Equity"]
 
@@ -80,12 +77,12 @@ if arquivo:
         bench_anual = {}
 
         for b, r in benchmarks.items():
-            if r.empty:
-                st.error(f"Benchmark {b} sem dados.")
-                st.stop()
-            curva = (1 + r).cumprod() - 1
+            r_valid = r.dropna()
+            if len(r_valid) == 0:
+                continue
+            curva = (1 + r_valid).cumprod() - 1
             curvas_bench[b] = curva
-            bench_anual[b] = (1 + curva.iloc[-1])**(252/num_dias) - 1
+            bench_anual[b] = (1 + curva.iloc[-1])**(252 / len(r_valid)) - 1
 
         # ================= PESOS =================
         st.subheader("🏗️ Definição de Pesos por Perfil")
@@ -99,38 +96,39 @@ if arquivo:
         pesos = st.data_editor(df_pesos, hide_index=True, use_container_width=True)
 
         # ================= CÁLCULOS =================
-        cov = ret_assets.cov() * 252
-        perf_acum = pd.DataFrame(index=ret_assets.index)
+        perf_acum = pd.DataFrame()
         metrics = {}
 
         for p in perfis:
-            w = pesos[p].values / 100
-            soma = w.sum()
+            ativos_p = pesos.loc[pesos[p] > 0, "Ativo"]
+            pesos_p = pesos.loc[pesos[p] > 0, p] / 100
 
-            if soma == 0:
-                continue  # <-- evita o erro definitivamente
+            if ativos_p.empty:
+                continue
 
-            if abs(soma - 1) > 1e-4:
-                st.warning(f"{p}: soma dos pesos ≠ 100% ({soma*100:.1f}%)")
+            ret_sub = ret_assets[ativos_p].dropna(how="any")
+            if ret_sub.empty:
+                continue
 
-            r_p = ret_assets.dot(w)
-            perf_acum[p] = (1 + r_p).cumprod() - 1
+            r_p = ret_sub.dot(pesos_p.values)
+            curva_p = (1 + r_p).cumprod() - 1
+            perf_acum[p] = curva_p
 
-            r_anual = (1 + perf_acum[p].iloc[-1])**(252/num_dias) - 1
-            vol = np.sqrt(w.T @ cov @ w)
+            r_anual = (1 + curva_p.iloc[-1])**(252 / len(r_p)) - 1
+            vol = r_p.std() * np.sqrt(252)
 
             m = {
                 "Retorno Anualizado": r_anual,
                 "Volatilidade": vol
             }
 
-            for b in benchmarks:
+            for b in bench_anual:
                 m[f"Sharpe vs {b}"] = (r_anual - bench_anual[b]) / vol if vol > 0 else 0
 
             metrics[p] = m
 
         if not metrics:
-            st.warning("Preencha ao menos um perfil com pesos > 0.")
+            st.warning("Preencha ao menos um perfil com pesos válidos.")
             st.stop()
 
         # ================= RESULTADOS =================
@@ -160,9 +158,9 @@ if arquivo:
                 line=dict(color=CORES_BENCH[b], dash="dot", width=1.5)
             ))
 
-        for i, p in enumerate(metrics.keys()):
+        for i, p in enumerate(perf_acum.columns):
             fig.add_trace(go.Scatter(
-                x=perf_acum.index,
+                x=perf_acum[p].index,
                 y=perf_acum[p],
                 name=p,
                 line=dict(color=CORES_LIFETIME[i], width=3)
@@ -178,4 +176,4 @@ if arquivo:
         st.plotly_chart(fig, use_container_width=True)
 
     except Exception as e:
-        st.error(f"Erro: {e}")
+        st.error(f"Erro inesperado: {e}")
