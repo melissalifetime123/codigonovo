@@ -2,229 +2,199 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import datetime
-from dateutil.relativedelta import relativedelta
 
-# ======================================================
-# CONFIGURAÇÃO DA PÁGINA
-# ======================================================
-st.set_page_config(page_title="Offshore Portfolio Analytics", layout="wide")
+# ================== CONFIG ==================
+st.set_page_config(page_title="Portfolio Analytics | Offshore", layout="wide")
+
+CORES_LIFETIME = ['#D1D5DB', '#9CA3AF', '#6B7280', '#4B5563', '#1C2C54']
+COR_BENCH = '#64748B'
 
 st.markdown("""
 <style>
 [data-testid="stDataFrame"] { width: 100%; }
-h1, h2, h3 { color: #1C2C54; font-family: 'Segoe UI', sans-serif; }
-.stTabs [data-baseweb="tab-list"] { gap: 24px; }
-.stTabs [data-baseweb="tab"] {
-    height: 50px;
-    background-color: #f0f2f6;
-    border-radius: 4px;
-    padding: 10px;
-}
-.stTabs [aria-selected="true"] {
-    background-color: #1C2C54 !important;
-    color: white !important;
+th { min-width: 110px !important; text-align: center !important; }
+.metric-container {
+    background-color: #F8F9FA;
+    padding: 15px;
+    border-radius: 10px;
+    border-left: 5px solid #1C2C54;
+    margin-top: 55px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ======================================================
-# FUNÇÕES
-# ======================================================
-@st.cache_data
-def load_offshore_data(file):
-    df = pd.read_excel(file)
-    df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df = df.dropna(subset=['Date']).sort_values('Date').set_index('Date')
-    return df.apply(pd.to_numeric, errors='coerce').ffill()
+st.title("🌍 Asset Allocation | Offshore")
 
+st.sidebar.header("Configurações")
+arquivo = st.sidebar.file_uploader("Upload da Base Offshore", type=["xlsx", "csv"])
 
-def calculate_benchmarks(returns):
-    benchmarks = {}
+# ================== LOAD ==================
+if arquivo:
+    try:
+        if arquivo.name.endswith(".csv"):
+            df = pd.read_csv(arquivo, index_col=0, parse_dates=True)
+        else:
+            df = pd.read_excel(arquivo, index_col=0, parse_dates=True)
 
-    if 'CPI' in returns.columns:
-        benchmarks['CPI'] = returns['CPI']
+        df = df.apply(pd.to_numeric, errors="coerce").dropna(how="all")
+        ret = df.pct_change().dropna()
+        num_dias = len(ret)
 
-    if 'Bloomberg Global Aggregate' in returns.columns:
-        benchmarks['100% BBG Global Agg'] = returns['Bloomberg Global Aggregate']
+        # ================== BENCHMARKS ==================
+        ret_cpi = ret["CPI"]
+        ret_agg = ret["Bloomberg Global Aggregate"]
+        ret_eq = ret["Equity"]  # MSCI World
 
-    if {'Equity', 'Bloomberg Global Aggregate'}.issubset(returns.columns):
-        benchmarks['10% MSCI World + 90% BBG Agg'] = (
-            0.10 * returns['Equity'] +
-            0.90 * returns['Bloomberg Global Aggregate']
-        )
-        benchmarks['20% MSCI World + 80% BBG Agg'] = (
-            0.20 * returns['Equity'] +
-            0.80 * returns['Bloomberg Global Aggregate']
-        )
+        benchmarks = {
+            "CPI": ret_cpi,
+            "100% BBG Global Agg": ret_agg,
+            "10% MSCI World + 90% Agg": 0.10 * ret_eq + 0.90 * ret_agg,
+            "20% MSCI World + 80% Agg": 0.20 * ret_eq + 0.80 * ret_agg
+        }
 
-    return benchmarks
+        bench_sel = st.sidebar.selectbox("Benchmark", list(benchmarks.keys()))
+        ret_bench = benchmarks[bench_sel]
 
-# ======================================================
-# SIDEBAR
-# ======================================================
-with st.sidebar:
-    st.title("📂 Configurações")
-    uploaded_file = st.file_uploader("Upload do ficheiro database.xlsx", type=["xlsx"])
+        curva_bench = (1 + ret_bench).cumprod() - 1
+        bench_anual = (1 + curva_bench.iloc[-1]) ** (252 / num_dias) - 1
 
-    start_date = None
-    end_date = None
+        # ================== PESOS ==================
+        st.subheader("🏗️ Definição de Pesos por Perfil")
 
-    if uploaded_file:
-        df_temp = load_offshore_data(uploaded_file)
-        min_db = df_temp.index.min().to_pydatetime()
-        max_db = df_temp.index.max().to_pydatetime()
+        perfis = ["Ultra", "Conservative", "Moderate", "Growth", "Aggressive"]
 
-        timeframe = st.radio(
-            "Escolha o período:",
-            ["Máximo", "YTD", "12 Meses", "24 Meses", "Personalizado"],
-            index=2
-        )
-
-        if timeframe == "Máximo":
-            start_date, end_date = min_db, max_db
-        elif timeframe == "YTD":
-            start_date = datetime.datetime(max_db.year, 1, 1)
-            end_date = max_db
-        elif timeframe == "12 Meses":
-            start_date = max_db - relativedelta(months=12)
-            end_date = max_db
-        elif timeframe == "24 Meses":
-            start_date = max_db - relativedelta(months=24)
-            end_date = max_db
-        elif timeframe == "Personalizado":
-            periodo = st.date_input(
-                "Selecione o intervalo:",
-                value=(min_db, max_db),
-                min_value=min_db,
-                max_value=max_db
-            )
-            if isinstance(periodo, tuple) and len(periodo) == 2:
-                start_date, end_date = periodo
-
-        if start_date and end_date:
-            st.info(f"📍 {start_date:%d/%m/%Y} → {end_date:%d/%m/%Y}")
-
-# ======================================================
-# MAIN
-# ======================================================
-if uploaded_file and start_date and end_date:
-    df = load_offshore_data(uploaded_file)
-    df = df.loc[start_date:end_date]
-
-    if df.empty:
-        st.warning("Sem dados para o período.")
-    else:
-        st.title("📊 Análise de Portfólio Offshore")
-
-        # ------------------------------
-        # ALOCAÇÃO
-        # ------------------------------
-        perfis_df = pd.DataFrame({
-            "Classe": ['Cash', 'High Yield', 'Investment Grade', 'Treasury 10y', 'Equity', 'Alternatives'],
-            "Ultra Conservador": [90, 0, 10, 0, 0, 0],
-            "Conservador": [60, 0, 30, 10, 0, 0],
-            "Moderado": [20, 10, 30, 10, 20, 10],
-            "Arrojado": [5, 15, 15, 5, 45, 15],
-            "Agressivo": [0, 15, 5, 0, 60, 20]
+        df_pesos = pd.DataFrame({
+            "Classe": df.columns,
+            "Ativo": df.columns
         })
 
-        edited_df = st.data_editor(perfis_df, hide_index=True, use_container_width=True)
+        for p in perfis:
+            df_pesos[p] = 0.0
 
-        perfil = st.select_slider(
-            "Selecione o perfil:",
-            options=list(edited_df.columns[1:]),
-            value="Moderado"
-        )
+        pesos = st.data_editor(df_pesos, hide_index=True, use_container_width=True)
 
-        # ------------------------------
-        # CÁLCULOS
-        # ------------------------------
-        returns = df.pct_change().dropna()
-        weights = edited_df.set_index("Classe")[perfil] / 100
+        # ================== CÁLCULOS ==================
+        metrics = {}
+        perf_acum = pd.DataFrame(index=ret.index)
+        risk_decomp = {}
+        cov = ret.cov() * 252
 
-        portfolio_return = sum(
-            returns[col] * weights[col]
-            for col in weights.index if col in returns.columns
-        )
+        for p in perfis:
+            w = pesos[p].values / 100
+            r_p = ret.dot(w)
 
-        benchmarks = calculate_benchmarks(returns)
+            r_anual = (1 + (1 + r_p).prod() - 1) ** (252 / num_dias) - 1
+            vol = np.sqrt(w.T @ cov @ w)
 
-        # ------------------------------
-        # KPIs
-        # ------------------------------
-        c1, c2, c3 = st.columns(3)
+            sharpe = (r_anual - bench_anual) / vol if vol > 0 else 0
 
-        with c1:
-            total_ret = (1 + portfolio_return).prod() - 1
-            st.metric("Retorno no Período", f"{total_ret:.2%}")
+            metrics[p] = {
+                "Retorno Anualizado": r_anual,
+                "Volatilidade": vol,
+                "Sharpe": sharpe
+            }
 
-        with c2:
-            vol = portfolio_return.std() * np.sqrt(12)
-            st.metric("Volatilidade (a.a.)", f"{vol:.2%}")
+            perf_acum[p] = (1 + r_p).cumprod() - 1
 
-        with c3:
-            for name, series in benchmarks.items():
-                b_ret = (1 + series).prod() - 1
-                st.caption(f"{name}: {b_ret:.2%}")
+            if vol > 0:
+                rc = (w * (cov @ w)) / vol**2
+                risk_decomp[p] = pd.Series(rc, index=df.columns)
 
-        # ------------------------------
-        # GRÁFICOS
-        # ------------------------------
-        tab1, tab2 = st.tabs(["📈 Performance", "🧱 Composição"])
+        # ================== RESULTADOS ==================
+        st.markdown("---")
+        col_l, col_r = st.columns([3, 1])
 
-        with tab1:
-            fig = go.Figure()
+        with col_l:
+            res = pd.DataFrame(metrics)
+            st.dataframe(
+                res.style.format({
+                    "Retorno Anualizado": "{:.2%}",
+                    "Volatilidade": "{:.2%}",
+                    "Sharpe": "{:.2f}"
+                }),
+                use_container_width=True
+            )
 
-            cum_port = (1 + portfolio_return).cumprod() * 100
+        with col_r:
+            st.markdown(
+                f"""
+                <div class="metric-container">
+                <small>BENCHMARK DO PERÍODO</small><br>
+                <strong>{bench_sel}</strong><br>
+                <small>Retorno Anualizado: {bench_anual:.2%}</small>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        # ================== PERFORMANCE ==================
+        st.markdown("---")
+        st.subheader("📈 Performance das Carteiras")
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=curva_bench.index,
+            y=curva_bench,
+            name=bench_sel,
+            line=dict(color=COR_BENCH, dash="dot")
+        ))
+
+        for i, p in enumerate(perfis):
+            excesso = perf_acum[p] - curva_bench
             fig.add_trace(go.Scatter(
-                x=cum_port.index,
-                y=cum_port,
-                name=f"Carteira {perfil}",
-                line=dict(width=4, color="#1C2C54")
+                x=perf_acum.index,
+                y=perf_acum[p],
+                name=p,
+                line=dict(color=CORES_LIFETIME[i], width=2),
+                customdata=excesso * 100,
+                hovertemplate="%{y:.1%} (Alpha %{customdata:.1f}%)"
             ))
 
-            for name, series in benchmarks.items():
-                cum_b = (1 + series).cumprod() * 100
-                fig.add_trace(go.Scatter(
-                    x=cum_b.index,
-                    y=cum_b,
-                    name=name,
-                    line=dict(dash='dot', width=2)
-                ))
+        fig.update_layout(
+            template="simple_white",
+            yaxis_tickformat=".1%",
+            hovermode="x unified",
+            height=600
+        )
 
-            fig.update_layout(
-                template="simple_white",
-                hovermode="x unified",
-                title="Evolução Patrimonial (Base 100)"
-            )
+        st.plotly_chart(fig, use_container_width=True)
 
-            st.plotly_chart(fig, use_container_width=True)
+        # ================== CORRELAÇÃO ==================
+        st.markdown("---")
+        st.subheader("🔍 Matriz de Correlação")
+        st.dataframe(
+            ret.corr().style.background_gradient(cmap="RdYlGn_r", vmin=-1, vmax=1).format("{:.2f}"),
+            use_container_width=True
+        )
 
-        with tab2:
-            comp_df = pd.DataFrame(index=df.index)
+        # ================== RISCO x RETORNO ==================
+        st.markdown("---")
+        st.subheader("🎯 Risco vs Retorno (Histórico)")
 
-            for asset, w in weights.items():
-                if asset in df.columns and w > 0:
-                    comp_df[asset] = w * (df[asset] / df[asset].iloc[0]) * 100
+        f = go.Figure()
+        for i, p in enumerate(perfis):
+            alpha = metrics[p]["Retorno Anualizado"] - bench_anual
+            f.add_trace(go.Scatter(
+                x=[metrics[p]["Volatilidade"]],
+                y=[alpha],
+                mode="markers+text",
+                text=[p],
+                textposition="top center",
+                marker=dict(size=15, color=CORES_LIFETIME[i])
+            ))
 
-            fig_area = go.Figure()
-            for col in comp_df.columns:
-                fig_area.add_trace(go.Scatter(
-                    x=comp_df.index,
-                    y=comp_df[col],
-                    stackgroup='one',
-                    name=col,
-                    mode='none'
-                ))
+        f.add_hline(y=0, line_dash="dot", line_color="#475569")
+        f.update_layout(
+            template="simple_white",
+            xaxis_title="Volatilidade",
+            yaxis_title="Alpha vs Benchmark",
+            yaxis_tickformat=".1%",
+            xaxis_tickformat=".1%",
+            height=450,
+            showlegend=False
+        )
 
-            fig_area.update_layout(
-                template="simple_white",
-                title="Exposição por Ativo"
-            )
+        st.plotly_chart(f, use_container_width=True)
 
-            st.plotly_chart(fig_area, use_container_width=True)
-
-else:
-    st.info("Faça upload do ficheiro para começar.")
+    except Exception as e:
+        st.error(f"Erro: {e}")
