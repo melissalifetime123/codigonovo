@@ -37,22 +37,23 @@ if arquivo:
     try:
         # --- 1. LEITURA E TRATAMENTO (Base 100 para Retorno) ---
         df_raw = pd.read_excel(arquivo, index_col=0, parse_dates=True)
+        # Garante que os dados sejam numéricos e remove linhas vazias
         df_raw = df_raw.apply(pd.to_numeric, errors='coerce').ffill().dropna(how='all')
         
-        start, end = st.sidebar.slider("Janela:", 
+        start, end = st.sidebar.slider("Janela de Análise:", 
                                        df_raw.index.min().to_pydatetime(), 
                                        df_raw.index.max().to_pydatetime(), 
                                        (df_raw.index.min().to_pydatetime(), df_raw.index.max().to_pydatetime()))
         df_f = df_raw.loc[start:end].copy()
 
-        # Transformação: Variação percentual mensal
+        # Cálculo dos retornos mensais (crucial para volatilidade correta)
         df_ret = df_f.pct_change().dropna()
         
         col_cpi = "CPI"
         col_agg = "Bloomberg Global Aggregate"
         col_equity = "Equity" 
 
-        # --- 2. CÁLCULO DOS BENCHMARKS (Ponderação Mensal) ---
+        # --- 2. CÁLCULO DOS BENCHMARKS ---
         r_agg = df_ret[col_agg]
         r_eq = df_ret[col_equity]
         
@@ -84,18 +85,17 @@ if arquivo:
         if any(round(edited[p].sum(), 2) != 100.0 for p in perfis):
             st.warning("⚠️ Ajuste os pesos para que a soma de cada perfil seja exatamente 100%.")
 
-        # --- 4. CÁLCULOS DE MÉTRICAS (Ajustado conforme seu 1º código) ---
+        # --- 4. CÁLCULOS DE MÉTRICAS (Revisão da Volatilidade) ---
         metrics, perf_acum, drawdowns = {}, pd.DataFrame(index=ret_classes.index), pd.DataFrame(index=ret_classes.index)
         freq = 12 
-        
-        # Rf para o Sharpe (Baseado no 1º código: retorno anualizado do Global Agg)
-        agg_anual_ref = (1 + r_agg.mean())**freq - 1
 
         for p in perfis:
+            # Vetor de pesos
             w = np.array(edited[p]) / 100
+            # Retorno da carteira mês a mês
             ret_p = ret_classes.dot(w)
             
-            # Rentabilidade Acumulada
+            # Rentabilidade Acumulada para os gráficos
             acum = (1 + ret_p).cumprod()
             perf_acum[p] = acum - 1
             
@@ -104,29 +104,23 @@ if arquivo:
             dd = (acum / picos) - 1
             drawdowns[p] = dd
             
-            # Lógica de cálculo do seu 1º código:
+            # MÉTRICAS ANUALIZADAS
+            # Retorno: média geométrica anualizada
             r_anual = (1 + ret_p.mean())**freq - 1
-            vol_anual = ret_p.std() * np.sqrt(freq)
             
-            # Sharpe Ratio vs Agg
-            sharpe_vs_agg = (r_anual - agg_anual_ref) / vol_anual if vol_anual > 0 else 0
+            # Volatilidade: desvio padrão dos retornos mensais * raiz de 12
+            vol_anual = ret_p.std() * np.sqrt(freq)
             
             metrics[p] = {
                 "Retorno Anualizado": r_anual,
                 "Volatilidade": vol_anual,
-                "Max Drawdown": dd.min(),
-                "Sharpe (vs Agg)": sharpe_vs_agg
+                "Max Drawdown": dd.min()
             }
 
         # --- 5. EXIBIÇÃO DE RESULTADOS ---
         st.markdown("---")
         st.write("📊 **Estatísticas Comparativas**")
-        # Aplicando a formatação do seu 1º código (percentual e decimais no Sharpe)
-        st.dataframe(pd.DataFrame(metrics).style.format({
-            p: "{:.2%}" for p in perfis
-        }).format({
-            p: "{:.2f}" for p in perfis
-        }, subset=pd.IndexSlice[["Sharpe (vs Agg)"], :]), use_container_width=True)
+        st.dataframe(pd.DataFrame(metrics).style.format("{:.2%}"), use_container_width=True)
 
         # Gráfico Performance
         st.subheader("📈 Performance vs Benchmarks Híbridos")
@@ -140,14 +134,15 @@ if arquivo:
         st.plotly_chart(fig_perf, use_container_width=True)
 
         # Gráfico Drawdown
-        st.subheader("📉 Drawdown (Janela de Stress)")
+        st.subheader("📉 Drawdown (Histórico de Quedas)")
+        
         fig_dd = go.Figure()
         for i, p in enumerate(perfis):
             fig_dd.add_trace(go.Scatter(x=drawdowns.index, y=drawdowns[p], name=p, fill='tozeroy', line=dict(color=CORES_LIFETIME[i], width=1)))
         fig_dd.update_layout(template="simple_white", yaxis_tickformat='.1%')
         st.plotly_chart(fig_dd, use_container_width=True)
 
-        # Matriz de Correlação (Matriz Antiga preservada)
+        # Matriz de Correlação
         st.subheader("🎯 Matriz de Correlação")
         corr_matrix = ret_classes.corr()
         st.dataframe(corr_matrix.style.format("{:.2f}").background_gradient(cmap='RdYlGn_r', axis=None), use_container_width=True)
