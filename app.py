@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
-# 1. CONFIGURAÇÃO DE PÁGINA
+# ================= CONFIGURAÇÃO =================
 st.set_page_config(page_title="Portfolio Analytics | Offshore", layout="wide")
 
 st.markdown("""
@@ -28,13 +28,11 @@ CORES_BENCH = {
 st.title("🌍 Asset Allocation | Offshore")
 
 st.sidebar.header("Configurações")
-# ALTERAÇÃO: Agora aceita especificamente Excel
-arquivo = st.sidebar.file_uploader("Upload da Base Excel (database.xlsx)", type=['xlsx'])
+arquivo = st.sidebar.file_uploader("Upload da Base Excel", type=['xlsx'])
 
 if arquivo:
     try:
         # --- LEITURA DO EXCEL ---
-        # O pandas lê a primeira aba por padrão. Se houver abas específicas, podemos ajustar.
         df_raw = pd.read_excel(arquivo, index_col=0, parse_dates=True)
         df_raw = df_raw.apply(pd.to_numeric, errors='coerce').ffill().dropna(how='all')
         
@@ -45,34 +43,34 @@ if arquivo:
                                        (df_raw.index.min().to_pydatetime(), df_raw.index.max().to_pydatetime()))
         df_f = df_raw.loc[start:end].copy()
 
-        # --- PROCESSAMENTO DE RETORNOS ---
+        # --- CÁLCULO DE RETORNOS MENSALIZADOS ---
         df_ret = df_f.pct_change().dropna()
         
-        # Identificação de Benchmarks e Classes baseada na sua planilha
+        # Identificação de colunas chaves
         col_cpi = "CPI"
         col_agg = "Bloomberg Global Aggregate"
         col_equity = "Equity"
         
-        cols_bench_fixos = [col_cpi, col_agg]
-        ret_classes = df_ret.drop(columns=[c for c in cols_bench_fixos if c in df_ret.columns])
-
-        # --- BENCHMARKS HÍBRIDOS ---
+        # --- CÁLCULO DOS BENCHMARKS (CORRIGIDO) ---
         ret_agg = df_ret[col_agg]
-        ret_eq = df_ret[col_equity] if col_equity in df_ret.columns else ret_agg
+        ret_eq = df_ret[col_equity]
         
-        bench_map = {
-            "CPI": df_ret[col_cpi],
-            "100% BBG Global Agg": ret_agg,
-            "10% MSCI World + 90% Agg": (0.10 * ret_eq) + (0.90 * ret_agg),
-            "20% MSCI World + 80% Agg": (0.20 * ret_eq) + (0.80 * ret_agg)
-        }
-        
-        # Frequência (Mensal = 12)
-        freq = 12 
-        rf_anual_ref = (1 + ret_agg.mean())**freq - 1
-        cpi_anualizado = (1 + df_ret[col_cpi].mean())**freq - 1
+        bench_data = pd.DataFrame(index=df_ret.index)
+        bench_data["CPI"] = df_ret[col_cpi]
+        bench_data["100% BBG Global Agg"] = ret_agg
+        bench_data["10% MSCI World + 90% Agg"] = (0.10 * ret_eq) + (0.90 * ret_agg)
+        bench_data["20% MSCI World + 80% Agg"] = (0.20 * ret_eq) + (0.80 * ret_agg)
 
-        # --- BLOCO 1: PESOS ---
+        # Classes de Ativos para Alocação (Removemos os benchmarks da lista de escolha)
+        cols_para_remover = [col_cpi, col_agg]
+        ret_classes = df_ret.drop(columns=[c for c in cols_para_remover if c in df_ret.columns])
+
+        # Anualização (12 meses)
+        freq = 12 
+        agg_anual = (1 + ret_agg.mean())**freq - 1
+        cpi_anual = (1 + df_ret[col_cpi].mean())**freq - 1
+
+        # --- INPUT DE PESOS ---
         st.subheader("🏗️ Definição de Pesos por Perfil")
         perfis = ["Ultra Conservador", "Conservador", "Moderado", "Arrojado", "Agressivo"]
         df_pesos_ui = pd.DataFrame({"Classe": ret_classes.columns})
@@ -94,13 +92,12 @@ if arquivo:
             # Decomposição de Risco (MCTR)
             if vol_p > 0:
                 marginal_risk = np.dot(cov_matrix, w) / vol_p
-                risk_contribution = w * marginal_risk
-                risk_decomp[p] = risk_contribution / vol_p
+                risk_decomp[p] = (w * marginal_risk) / vol_p
             
             metrics[p] = {
                 "Retorno Anualizado": r_anual,
                 "Volatilidade": vol_p,
-                "Sharpe (vs Agg)": (r_anual - rf_anual_ref) / vol_p if vol_p > 0 else 0
+                "Sharpe (vs Agg)": (r_anual - agg_anual) / vol_p if vol_p > 0 else 0
             }
             perf_acum[p] = (1 + ret_p).cumprod() - 1
 
@@ -108,37 +105,26 @@ if arquivo:
         st.markdown("---")
         col_res, col_info = st.columns([3, 1])
         with col_res:
-            st.write("📊 **Métricas de Performance**")
-            res_df = pd.DataFrame(metrics)
-            st.dataframe(res_df.style.format("{:.2%}", subset=pd.IndexSlice[["Retorno Anualizado", "Volatilidade"], :]).format("{:.2f}", subset=pd.IndexSlice[["Sharpe (vs Agg)"], :]), use_container_width=True)
+            st.write("📊 **Estatísticas dos Perfis**")
+            st.dataframe(pd.DataFrame(metrics).style.format("{:.2%}", subset=pd.IndexSlice[["Retorno Anualizado", "Volatilidade"], :]).format("{:.2f}", subset=pd.IndexSlice[["Sharpe (vs Agg)"], :]), use_container_width=True)
         with col_info:
-            st.markdown(f'<div class="metric-container"><small>INFLAÇÃO (CPI) ANUAL</small><br><strong>{cpi_anualizado:.2%}</strong><br><small>Ref. Agg: {rf_anual_ref:.2%}</small></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-container"><small>INFLAÇÃO (CPI) ANUAL</small><br><strong>{cpi_anual:.2%}</strong><br><small>Ref. Agg: {agg_anual:.2%}</small></div>', unsafe_allow_html=True)
 
         # Gráfico de Performance
         
         st.subheader("📊 Performance Acumulada")
         fig_perf = go.Figure()
-        for b, r_b in bench_map.items():
-            fig_perf.add_trace(go.Scatter(x=r_b.index, y=(1+r_b).cumprod()-1, name=b, line=dict(color=CORES_BENCH.get(b), dash='dot')))
+        for b in bench_data.columns:
+            curva_b = (1 + bench_data[b]).cumprod() - 1
+            fig_perf.add_trace(go.Scatter(x=curva_b.index, y=curva_b, name=b, line=dict(color=CORES_BENCH.get(b), dash='dot')))
         for i, p in enumerate(perfis):
             fig_perf.add_trace(go.Scatter(x=perf_acum.index, y=perf_acum[p], name=p, line=dict(color=CORES_LIFETIME[i], width=3)))
-        fig_perf.update_layout(template="simple_white", yaxis_tickformat='.1%', height=500, hovermode="x unified")
+        fig_perf.update_layout(template="simple_white", yaxis_tickformat='.1%', hovermode="x unified")
         st.plotly_chart(fig_perf, use_container_width=True)
 
-        # Decomposição de Risco
-        st.markdown("---")
-        st.subheader("🔍 Decomposição de Risco (%)")
-        risk_df = pd.DataFrame(risk_decomp).T
-        fig_risk = go.Figure()
-        for col in risk_df.columns:
-            fig_risk.add_trace(go.Bar(name=col, x=risk_df.index, y=risk_df[col]))
-        fig_risk.update_layout(barmode='stack', template="simple_white", yaxis_tickformat='.0%')
-        st.plotly_chart(fig_risk, use_container_width=True)
-
-        # Correlação
-        st.subheader("🎯 Matriz de Correlação das Classes")
+        # Matriz de Correlação
+        st.subheader("🎯 Matriz de Correlação")
         st.dataframe(ret_classes.corr().style.background_gradient(cmap='RdYlGn_r', vmin=-1, vmax=1).format("{:.2f}"), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Erro ao ler o Excel: {e}")
-        st.info("Verifique se a primeira coluna do Excel contém as datas e se as abas estão corretas.")
+        st.error(f"Erro no processamento: {e}")
